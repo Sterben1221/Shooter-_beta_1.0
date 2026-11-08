@@ -9,21 +9,27 @@ extern const char w3_b64[]; /* metralleta      4 cuadros */
 extern const char w4_b64[]; /* ametralladora   4 cuadros */
 extern const char w5_b64[]; /* lanzacohetes    4 cuadros */
 extern const char w6_b64[]; /* lanzallamas     4 cuadros */
+extern const char w7_b64[]; /* motosierra      4 cuadros */
 extern const char enemy_b64[];   /* soldado blanco, 50 cuadros de 64x64 */
 extern const char enemy2_b64[];  /* soldado verde,  50 cuadros de 64x64 */
 extern const char walls_b64[];   /* 9 texturas de pared de 64x64 */
-extern const char items_b64[];   /* 9 iconos de 32x32 */
+extern const char items_b64[];   /* 11 iconos de 64x64 */
+extern const char doors_b64[];   /* puerta: 4 cuadros de 64x64 */
+extern const char title_b64[];   /* pantalla de titulo 512x352 */
 
-#define WEAPON_COUNT   7
+#define WEAPON_COUNT   8
 #define WEAPON_SIZE    128
-#define WEAPON_TOTAL   36   /* suma de cuadros de todas las armas */
+#define WEAPON_TOTAL   40   /* suma de cuadros de todas las armas */
 #define ENEMY_FRAMES   50
 #define ENEMY_SIZE     64
 #define ENEMY_TYPES    2
 #define WALL_TEXTURES  9
 #define WALL_SIZE      64
-#define ITEM_TEXTURES  9
-#define ITEM_SIZE      32
+#define ITEM_TEXTURES  11
+#define ITEM_SIZE      64
+#define DOOR_FRAMES    4
+#define TITLE_W        512
+#define TITLE_H        352
 
 /* Cuadros de cada arma: 0 bajada, 1 reposo, 2 disparo, 3 retroceso;
    pistola y escopeta: 4..7 = recarga */

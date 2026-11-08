@@ -1,5 +1,5 @@
 /*
- * PS2 FPS - BETA 2
+ * DEAD LOCK PROTOCOL - BETA 4
  * Raycaster estilo Wolfenstein para PlayStation 2 (PS2SDK + gsKit).
  *
  * Controles:
@@ -9,7 +9,9 @@
  *   X o R2 ............................ disparar
  *   L1 / R1 ........................... cambiar de arma
  *   TRIANGULO ......................... recargar
- *   START ............................. reiniciar (al morir o ganar)
+ *   L2 ................................ soltar arma / cambiar por la del suelo
+ *   START ............................. pausa (en el menu: X acepta, O vuelve)
+ * (los botones se pueden cambiar en CONTROLES)
  * Las puertas se abren al acercarte (las de color piden su llave).
  * La salida es la puerta verde EXIT, detras de la puerta roja.
  */
@@ -33,14 +35,16 @@
 
 #include "assets.h"
 
-/* Tipos de item (los 8 primeros coinciden con el icono de items_b64) */
-enum { IT_MEDKIT, IT_VEST, IT_AMMO_BUL, IT_AMMO_ROCK, IT_AMMO_FUEL,
-       IT_KEY_B, IT_KEY_Y, IT_KEY_R, IT_AMMO_SHELL,
-       IT_W_SHOT, IT_W_MP, IT_W_CHAIN, IT_W_ROCKET, IT_W_FLAME,
-       IT_DROP, IT_DROP_SH };
+/* Tipos de item (los 11 primeros coinciden con el icono de items_b64) */
+enum { IT_MEDKIT, IT_VEST, IT_AMMO_PIS, IT_AMMO_SMG, IT_AMMO_CHAIN, IT_AMMO_SHELL,
+       IT_AMMO_ROCK, IT_AMMO_FUEL, IT_KEY_B, IT_KEY_Y, IT_KEY_R,
+       /* armas: tipo - IT_W_KNIFE = numero de arma */
+       IT_W_KNIFE, IT_W_PISTOL, IT_W_SHOT, IT_W_MP, IT_W_CHAIN, IT_W_ROCKET, IT_W_FLAME, IT_W_SAW };
 
-/* Armas: 0 cuchillo, 1 pistola, 2 escopeta, 3 metralleta, 4 ametralladora, 5 lanzacohetes, 6 lanzallamas */
-/* Municion de reserva: 0 balas, 1 cohetes, 2 combustible, 3 cartuchos */
+/* Armas: 0 cuchillo, 1 pistola, 2 escopeta, 3 metralleta, 4 ametralladora, 5 lanzacohetes,
+          6 lanzallamas, 7 motosierra. Solo se pueden llevar MAX_WEAPONS a la vez. */
+/* Municion de reserva: 0 pistola, 1 metralleta, 2 ametralladora, 3 cartuchos, 4 cohetes, 5 nafta */
+#define MAX_WEAPONS 3
 
 #include "level.h"   /* mapa, enemigos e items (generado por tools/make_level.py) */
 
@@ -55,14 +59,16 @@ enum { IT_MEDKIT, IT_VEST, IT_AMMO_BUL, IT_AMMO_ROCK, IT_AMMO_FUEL,
 /* Tipos                                                               */
 /* ------------------------------------------------------------------ */
 enum { E_IDLE, E_CHASE, E_ATTACK, E_PAIN, E_DEAD, E_RETURN };
-enum { G_PLAY, G_DEAD, G_WIN };
+enum { G_PLAY, G_DEAD, G_WIN, G_MENU, G_PAUSE };
+enum { M_MAIN, M_DIFF, M_OPT, M_CTRL, M_PAUSE };
+enum { A_FIRE, A_FIRE2, A_RELOAD, A_PREV, A_NEXT, A_LEFT, A_RIGHT, A_SWAP, NACT };
 
 typedef struct {
     float x, y, face, homeX, homeY, homeFace;
     int hp, state, timer, frame, cool, lost, type;
 } Enemy;
 
-typedef struct { float x, y; int type, active, val; } Item;
+typedef struct { float x, y; int type, active, val, delay; } Item;
 
 typedef struct {
     int dmg, cd;
@@ -73,7 +79,7 @@ typedef struct {
 
 typedef struct {
     float fwd, strafe, turn;
-    int fire, prev, next, start, reload;
+    int fire, prev, next, start, reload, swap;
 } Input;
 
 static const Weapon WEAP[WEAPON_COUNT] = {
@@ -81,18 +87,26 @@ static const Weapon WEAP[WEAPON_COUNT] = {
     {  2, 22,  1.7f, 0.0f,   0,    0,     0,    0,       0,      -1,      0 },  /* cuchillo        */
     {  2, 24, 14.0f, 0.0f,   0,    0,     1,    7,      80,       0,      0 },  /* pistola         */
     {  7, 45,  9.0f, 0.20f,  1,    0,     1,    2,     100,       3,      1 },  /* escopeta        */
-    {  1,  8, 14.0f, 0.0f,   0,    0,     1,   30,     110,       0,      0 },  /* metralleta      */
-    {  1,  4, 14.0f, 0.0f,   0,    0,     1,  100,     200,       0,      0 },  /* ametralladora   */
-    {  6, 70, 16.0f, 0.0f,   0,    3,     1,    1,      70,       1,      0 },  /* lanzacohetes    */
-    {  1,  4,  6.0f, 0.35f,  1,    0,     1,   50,     120,       2,      0 },  /* lanzallamas     */
+    {  1,  8, 14.0f, 0.0f,   0,    0,     1,   30,     110,       1,      0 },  /* metralleta      */
+    {  1,  4, 14.0f, 0.0f,   0,    0,     1,  100,     200,       2,      0 },  /* ametralladora   */
+    {  6, 70, 16.0f, 0.0f,   0,    3,     1,    1,      70,       4,      0 },  /* lanzacohetes    */
+    {  1,  4,  6.0f, 0.35f,  1,    0,     1,   50,     120,       5,      0 },  /* lanzallamas     */
+    {  2,  6,  1.9f, 0.0f,   0,    0,     1,   40,     100,       5,      0 },  /* motosierra      */
 };
-#define AMMO_TYPES 4
-static const int AMMO_MAX[AMMO_TYPES] = { 200, 20, 100, 40 };
-static const char *AMMO_NAME[AMMO_TYPES] = { "BULLETS", "ROCKETS", "FUEL", "SHELLS" };
+#define AMMO_TYPES 6
+static const int AMMO_MAX[AMMO_TYPES] = { 70, 180, 300, 32, 20, 100 };
+static const int AMMO_PICK[AMMO_TYPES] = { 14, 30, 60, 8, 4, 40 };
+static const char *AMMO_NAME[AMMO_TYPES] = { "PISTOL", "SMG", "CHAINGUN", "SHELLS", "ROCKETS", "FUEL" };
+static const char *WNAME[WEAPON_COUNT] = { "KNIFE", "PISTOL", "SHOTGUN", "SMG", "CHAINGUN", "ROCKET", "FLAMER", "CHAINSAW" };
+static const int WGIVE[WEAPON_COUNT] = { 0, 14, 8, 30, 60, 5, 40, 40 };  /* reserva que trae un arma nueva */
 
 /* Cuadros de textura de cada arma (cuantos tiene cada una y donde empieza) */
-static const int WNF[WEAPON_COUNT]   = { 4, 8, 8, 4, 4, 4, 4 };
-static const int WBASE[WEAPON_COUNT] = { 0, 4, 12, 20, 24, 28, 32 };
+static const int WNF[WEAPON_COUNT]   = { 4, 8, 8, 4, 4, 4, 4, 4 };
+static const int WBASE[WEAPON_COUNT] = { 0, 4, 12, 20, 24, 28, 32, 36 };
+
+/* Dificultad: 0 facil, 1 medio, 2 dificil */
+static const float DIFF_DMG[3] = { 0.6f, 1.0f, 1.5f };
+static const float DIFF_HP[3]  = { 0.7f, 1.0f, 1.4f };
 
 /* Enemigos: 0 soldado blanco, 1 soldado verde (mas duro) */
 static const int   EHP[ENEMY_TYPES]    = { 6, 9 };
@@ -118,6 +132,12 @@ static float px, py, pa, bob, stepAcc;
 static int health, armor, weapon, wcool, wtime, shots, hurtFlash, gameState, frameCount;
 static int have[WEAPON_COUNT], ammo[AMMO_TYPES], mag[WEAPON_COUNT], haveKey[3], kills;
 static int reloading, rtime;
+
+/* Ajustes y menu */
+static int diff = 1, sens = 5, volume = 10;
+static u32 bind[NACT];
+static int menuScreen, menuSel, menuBack, rebind = -1;
+static u32 padPress;      /* botones recien presionados (con repeticion) */
 static char msgText[40];
 static int msgTimer;
 
@@ -126,6 +146,8 @@ static GSTEXTURE wtex[WEAPON_TOTAL];
 static GSTEXTURE etex[ENEMY_FRAMES * ENEMY_TYPES];
 static GSTEXTURE walltex[WALL_TEXTURES];
 static GSTEXTURE itemtex[ITEM_TEXTURES];
+static GSTEXTURE doortex[DOOR_FRAMES];
+static GSTEXTURE titletex;
 static int SW = 640, SH = 448, ncols = 160;
 static float zbuf[MAXCOLS];
 
@@ -158,7 +180,7 @@ static void audio_init(void)
     if (audsrv_init() != 0) return;
     fmt.freq = SND_RATE; fmt.bits = 16; fmt.channels = 1;
     if (audsrv_set_format(&fmt) != 0) return;
-    audsrv_set_volume(0x3FFF);
+    audsrv_set_volume(volume * 10);
 
     /* paso: golpe grave + ruido filtrado que se apaga */
     for (i = 0; i < SND_STEPLEN; i++) {
@@ -175,6 +197,7 @@ static void audio_init(void)
 static void sfx_step(float vol)
 {
     int i, slot = 0, oldest = -1;
+    vol *= volume / 10.0f;
     if (!audio_ok || vol <= 0.03f) return;
     if (vol > 1.0f) vol = 1.0f;
     for (i = 0; i < NVOICE; i++) {
@@ -300,12 +323,13 @@ static void setmsg(const char *s)
     msgTimer = 150;
 }
 
-static void spawn_item(float x, float y, int type, int val)
+static int spawn_item(float x, float y, int type, int val)
 {
     int i;
     for (i = 0; i < nItems; i++) if (!items[i].active) break;
-    if (i == nItems) { if (nItems >= MAX_ITEMS) return; nItems++; }
-    items[i].x = x; items[i].y = y; items[i].type = type; items[i].active = 1; items[i].val = val;
+    if (i == nItems) { if (nItems >= MAX_ITEMS) return -1; nItems++; }
+    items[i].x = x; items[i].y = y; items[i].type = type; items[i].active = 1; items[i].val = val; items[i].delay = 0;
+    return i;
 }
 
 static int add_ammo(int type, int n)
@@ -322,19 +346,28 @@ static void select_weapon(int w)
     reloading = 0;                    /* cambiar de arma cancela la recarga */
 }
 
-static int give_weapon(int w, int n)
+static int weapons_carried(void)
 {
-    int first = !have[w];
+    int i, n = 0;
+    for (i = 0; i < WEAPON_COUNT; i++) n += have[i];
+    return n;
+}
+
+/* Toma el arma del suelo. val = 0: nueva (cargada y con reserva); val > 0: soltada, trae mag = val - 1 */
+static void take_weapon(int w, int val)
+{
     have[w] = 1;
-    if (mag[w] == 0 && WEAP[w].mag > 0) mag[w] = WEAP[w].mag;   /* la primera vez viene cargada */
-    if (WEAP[w].atype >= 0) add_ammo(WEAP[w].atype, n);
-    if (first && w > weapon) select_weapon(w);
-    return 1;
+    if (WEAP[w].mag > 0) mag[w] = (val > 0) ? val - 1 : WEAP[w].mag;
+    if (val == 0 && WEAP[w].atype >= 0) add_ammo(WEAP[w].atype, WGIVE[w]);
+    select_weapon(w);
+    setmsg(WNAME[w]);
 }
 
 static int pickup(Item *it)
 {
-    switch (it->type) {
+    int t = it->type, half = (it->val == 1);
+    if (it->delay > 0) return 0;
+    switch (t) {
     case IT_MEDKIT:
         if (health >= 100) return 0;
         health += 25; if (health > 100) health = 100;
@@ -343,22 +376,61 @@ static int pickup(Item *it)
         if (armor >= 100) return 0;
         armor += 50; if (armor > 100) armor = 100;
         setmsg("VEST"); return 1;
-    case IT_AMMO_BUL:   if (!add_ammo(0, 20)) return 0; setmsg("BULLETS"); return 1;
-    case IT_AMMO_ROCK:  if (!add_ammo(1, 4))  return 0; setmsg("ROCKETS"); return 1;
-    case IT_AMMO_FUEL:  if (!add_ammo(2, 25)) return 0; setmsg("FUEL"); return 1;
-    case IT_AMMO_SHELL: if (!add_ammo(3, 8))  return 0; setmsg("SHELLS"); return 1;
-    case IT_DROP:       if (!add_ammo(0, it->val)) return 0; return 1;
-    case IT_DROP_SH:    if (!add_ammo(3, 4)) return 0; return 1;
+    case IT_AMMO_PIS: case IT_AMMO_SMG: case IT_AMMO_CHAIN:
+    case IT_AMMO_SHELL: case IT_AMMO_ROCK: case IT_AMMO_FUEL: {
+        int k = t - IT_AMMO_PIS, n = AMMO_PICK[k];
+        if (half) { n /= 2; if (n < 1) n = 1; }
+        if (!add_ammo(k, n)) return 0;
+        setmsg(AMMO_NAME[k]); return 1;
+    }
     case IT_KEY_B: haveKey[0] = 1; setmsg("BLUE KEY"); return 1;
     case IT_KEY_Y: haveKey[1] = 1; setmsg("YELLOW KEY"); return 1;
     case IT_KEY_R: haveKey[2] = 1; setmsg("RED KEY"); return 1;
-    case IT_W_SHOT:   give_weapon(2, 8);  setmsg("SHOTGUN"); return 1;
-    case IT_W_MP:     give_weapon(3, 30); setmsg("SMG"); return 1;
-    case IT_W_CHAIN:  give_weapon(4, 60); setmsg("CHAINGUN"); return 1;
-    case IT_W_ROCKET: give_weapon(5, 5);  setmsg("ROCKET LAUNCHER"); return 1;
-    case IT_W_FLAME:  give_weapon(6, 40); setmsg("FLAMETHROWER"); return 1;
+    default:
+        if (t >= IT_W_KNIFE && t <= IT_W_SAW) {
+            int w = t - IT_W_KNIFE;
+            if (have[w]) {                         /* ya la tengo: solo municion */
+                int n = (it->val > 0) ? it->val - 1 : WGIVE[w];
+                if (WEAP[w].atype < 0 || n <= 0 || !add_ammo(WEAP[w].atype, n)) return 0;
+                setmsg(AMMO_NAME[WEAP[w].atype]); return 1;
+            }
+            if (weapons_carried() < MAX_WEAPONS) { take_weapon(w, it->val); return 1; }
+            if (msgTimer < 20) setmsg("FULL - PRESS L2 TO SWAP");
+            return 0;
+        }
     }
     return 0;
+}
+
+/* L2: cambia el arma actual por la que esta en el suelo; sin arma cerca, la suelta */
+static void swap_or_drop(void)
+{
+    int i, near = -1;
+    float bd = 1.0f;
+    for (i = 0; i < nItems; i++) {
+        float dx, dy, d;
+        if (!items[i].active || items[i].type < IT_W_KNIFE || items[i].delay > 0) continue;
+        if (have[items[i].type - IT_W_KNIFE]) continue;
+        dx = items[i].x - px; dy = items[i].y - py; d = sqrtf(dx * dx + dy * dy);
+        if (d < bd) { bd = d; near = i; }
+    }
+    if (near < 0 && weapons_carried() <= 1) { setmsg("LAST WEAPON"); return; }
+    {
+        float fx = px + cosf(pa) * 0.7f, fy = py + sinf(pa) * 0.7f;
+        int old = weapon, keepVal = (WEAP[old].mag > 0) ? mag[old] + 1 : 0, k;
+        int newType = -1, newVal = 0;
+        if (is_wall(fx, fy)) { fx = px; fy = py; }
+        if (near >= 0) { newType = items[near].type; newVal = items[near].val; items[near].active = 0; }
+        k = spawn_item(fx, fy, IT_W_KNIFE + old, keepVal);
+        if (k >= 0) items[k].delay = 90;      /* no se recoge de inmediato */
+        have[old] = 0; mag[old] = 0;
+        if (newType >= 0) take_weapon(newType - IT_W_KNIFE, newVal);
+        else {
+            int w;
+            for (w = 0; w < WEAPON_COUNT; w++) if (have[w]) { select_weapon(w); break; }
+            setmsg("DROPPED");
+        }
+    }
 }
 
 /* Se puede usar si la tenemos y queda municion (en el cargador o de reserva) */
@@ -435,7 +507,8 @@ static void reset_game(void)
         e->y = e->homeY = ENEMY_DEFS[i][1] + 0.5f;
         e->face = e->homeFace = ENEMY_DEFS[i][2] * PI_F / 180.0f;
         e->type = ENEMY_DEFS[i][3];
-        e->hp = EHP[e->type]; e->state = E_IDLE; e->frame = 0;
+        e->hp = (int)(EHP[e->type] * DIFF_HP[diff] + 0.5f); if (e->hp < 1) e->hp = 1;
+        e->state = E_IDLE; e->frame = 0;
         e->timer = (i * 37) % 500;   /* para que no giren todos a la vez */
     }
     for (i = 0; i < N_ITEM_DEFS; i++)
@@ -445,7 +518,7 @@ static void reset_game(void)
     health = 100; armor = 0; kills = 0;
     memset(have, 0, sizeof(have)); memset(ammo, 0, sizeof(ammo)); memset(mag, 0, sizeof(mag));
     memset(haveKey, 0, sizeof(haveKey));
-    have[0] = 1; have[1] = 1; mag[1] = WEAP[1].mag; ammo[0] = 30; weapon = 1;
+    have[0] = 1; have[1] = 1; mag[1] = WEAP[1].mag; ammo[0] = 28; weapon = 1;
     reloading = 0; rtime = 0;
     wcool = 0; wtime = 100; shots = 0;
     hurtFlash = 0; gameState = G_PLAY;
@@ -472,7 +545,7 @@ static void hurt_enemy(Enemy *e, int dmg)
     if (e->hp <= 0) {
         e->state = E_DEAD;
         kills++;
-        if (rand() % 3) spawn_item(e->x, e->y, (rand() % 4 == 0) ? IT_DROP_SH : IT_DROP, 10);
+        if (rand() % 3) spawn_item(e->x, e->y, (rand() % 4 == 0) ? IT_AMMO_SHELL : IT_AMMO_PIS, 1);
     } else {
         e->state = E_PAIN;
     }
@@ -638,7 +711,7 @@ static void enemy_update(Enemy *e)
         if (e->timer == 16) {
             int chance = (int)(90.0f - d * 8.0f);
             if (chance < 20) chance = 20;
-            if (los(e->x, e->y, px, py) && (rand() % 100) < chance) damage_player(EDMG[e->type] + rand() % 7);
+            if (los(e->x, e->y, px, py) && (rand() % 100) < chance) damage_player((int)((EDMG[e->type] + rand() % 7) * DIFF_DMG[diff] + 0.5f));
         }
         if (e->timer >= 26) {
             e->state = E_CHASE; e->timer = 0;
@@ -655,6 +728,102 @@ static void enemy_update(Enemy *e)
     case E_DEAD:
         e->timer++;
         e->frame = EF_DEATH + (e->timer / 6 > 4 ? 4 : e->timer / 6);
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Menus                                                               */
+/* ------------------------------------------------------------------ */
+static const u32 BIND_DEF[NACT] = { PAD_CROSS, PAD_R2, PAD_TRIANGLE, PAD_L1, PAD_R1, PAD_SQUARE, PAD_CIRCLE, PAD_L2 };
+static const u32 BTN_LIST[8] = { PAD_CROSS, PAD_CIRCLE, PAD_SQUARE, PAD_TRIANGLE, PAD_L1, PAD_R1, PAD_L2, PAD_R2 };
+static const char *BTN_NAME[8] = { "X", "CIRCULO", "CUADRADO", "TRIANGULO", "L1", "R1", "L2", "R2" };
+static const char *ACT_NAME[NACT] = { "DISPARO", "DISPARO 2", "RECARGAR", "ARMA ANTERIOR", "ARMA SIGUIENTE",
+                                      "LADO IZQUIERDO", "LADO DERECHO", "SOLTAR ARMA" };
+
+static const char *btn_name(u32 m)
+{
+    int k;
+    for (k = 0; k < 8; k++) if (BTN_LIST[k] == m) return BTN_NAME[k];
+    return "?";
+}
+
+static void apply_volume(void)
+{
+#ifdef USE_SOUND
+    if (audio_ok) audsrv_set_volume(volume * 10);
+#endif
+}
+
+static int menu_count(void)
+{
+    switch (menuScreen) {
+    case M_MAIN: return 4;
+    case M_DIFF: return 4;
+    case M_OPT:  return 3;
+    case M_CTRL: return NACT + 2;
+    default:     return 4;   /* pausa */
+    }
+}
+
+static void menu_goto(int screen, int sel) { menuScreen = screen; menuSel = sel; }
+
+static void menu_update(void)
+{
+    u32 pr = padPress;
+    int n = menu_count(), ok = (pr & PAD_CROSS) != 0, back = (pr & PAD_CIRCLE) != 0;
+    int dir = ((pr & PAD_RIGHT) ? 1 : 0) - ((pr & PAD_LEFT) ? 1 : 0);
+
+    if (menuScreen == M_CTRL && rebind >= 0) {          /* esperando un boton nuevo */
+        int k;
+        if (pr & PAD_START) { rebind = -1; return; }
+        for (k = 0; k < 8; k++) {
+            if (pr & BTN_LIST[k]) {
+                u32 nb = BTN_LIST[k];
+                int a;
+                for (a = 0; a < NACT; a++)
+                    if (a != rebind && bind[a] == nb) { bind[a] = bind[rebind]; break; }   /* intercambia */
+                bind[rebind] = nb; rebind = -1;
+                return;
+            }
+        }
+        return;
+    }
+
+    if (pr & PAD_UP)   menuSel = (menuSel + n - 1) % n;
+    if (pr & PAD_DOWN) menuSel = (menuSel + 1) % n;
+
+    switch (menuScreen) {
+    case M_MAIN:
+        if (ok) {
+            if (menuSel == 0) menu_goto(M_DIFF, diff);
+            else if (menuSel == 1) { menuBack = M_MAIN; menu_goto(M_OPT, 0); }
+            else if (menuSel == 2) { menuBack = M_MAIN; menu_goto(M_CTRL, 0); }
+            else Exit(0);
+        }
+        break;
+    case M_DIFF:
+        if (ok && menuSel < 3) { diff = menuSel; reset_game(); }
+        else if ((ok && menuSel == 3) || back) menu_goto(M_MAIN, 0);
+        break;
+    case M_OPT:
+        if (menuSel == 0 && dir) { sens += dir; if (sens < 1) sens = 1; if (sens > 10) sens = 10; }
+        if (menuSel == 1 && dir) {
+            volume += dir; if (volume < 0) volume = 0; if (volume > 10) volume = 10;
+            apply_volume(); sfx_step(1.0f);
+        }
+        if ((ok && menuSel == 2) || back) menu_goto(menuBack, menuBack == M_MAIN ? 1 : 1);
+        break;
+    case M_CTRL:
+        if (ok && menuSel < NACT) rebind = menuSel;
+        else if (ok && menuSel == NACT) memcpy(bind, BIND_DEF, sizeof(bind));
+        else if ((ok && menuSel == NACT + 1) || back) menu_goto(menuBack, 2);
+        break;
+    default: /* pausa */
+        if ((ok && menuSel == 0) || back || (pr & PAD_START)) gameState = G_PLAY;
+        else if (ok && menuSel == 1) { menuBack = M_PAUSE; menu_goto(M_OPT, 0); }
+        else if (ok && menuSel == 2) { menuBack = M_PAUSE; menu_goto(M_CTRL, 0); }
+        else if (ok && menuSel == 3) { gameState = G_MENU; menu_goto(M_MAIN, 0); }
         break;
     }
 }
@@ -703,13 +872,15 @@ static void game_update(const Input *in)
     int i;
     frameCount++;
 
+    if (gameState == G_MENU || gameState == G_PAUSE) { menu_update(); return; }
     if (gameState != G_PLAY) {
-        if (in->start) reset_game();
+        if (in->start) { gameState = G_MENU; menuScreen = M_MAIN; menuSel = 0; }
         return;
     }
+    if (in->start) { gameState = G_PAUSE; menuScreen = M_PAUSE; menuSel = 0; return; }
 
     /* giro y movimiento */
-    pa += in->turn * 0.045f;
+    pa += in->turn * 0.045f * (sens / 5.0f);
     if (pa > PI_F) pa -= 2.0f * PI_F;
     if (pa < -PI_F) pa += 2.0f * PI_F;
     {
@@ -735,6 +906,7 @@ static void game_update(const Input *in)
     if (in->prev && wcool == 0) cycle_weapon(-1);
     if (in->next && wcool == 0) cycle_weapon(1);
     if (in->reload) start_reload();
+    if (in->swap) swap_or_drop();
     if (reloading) {
         rtime++;
         if (rtime >= WEAP[weapon].reload) finish_reload();
@@ -761,6 +933,7 @@ static void game_update(const Input *in)
     for (i = 0; i < nItems; i++) {
         float dx, dy;
         if (!items[i].active) continue;
+        if (items[i].delay > 0) items[i].delay--;
         dx = items[i].x - px; dy = items[i].y - py;
         if (dx * dx + dy * dy < 0.45f * 0.45f && pickup(&items[i])) items[i].active = 0;
     }
@@ -817,6 +990,7 @@ static void draw_world(void)
         float ddx = (rdx == 0.0f) ? 1e30f : fabsf(1.0f / rdx);
         float ddy = (rdy == 0.0f) ? 1e30f : fabsf(1.0f / rdy);
         int stepx, stepy, side = 0, hit = 0, type = 1, guard = 0, texX, sh;
+        GSTEXTURE *tex;
         float sdx, sdy, dist, lh, ytop, ybot, yt, vmax, y0, y1, v0, v1, wallX, open = 0.0f;
 
         if (rdx < 0) { stepx = -1; sdx = (px - mx) * ddx; }
@@ -841,7 +1015,7 @@ static void draw_world(void)
         if (side == 0 && rdx > 0) texX = WALL_SIZE - 1 - texX;
         if (side == 1 && rdy < 0) texX = WALL_SIZE - 1 - texX;
 
-        if (type >= 5 && type <= 8) open = doorOpen[my][mx];
+        if (type >= 6 && type <= 8) open = doorOpen[my][mx];
         lh = SH / dist;
         ytop = SH / 2.0f - lh / 2.0f;
         ybot = ytop + lh;
@@ -854,7 +1028,11 @@ static void draw_world(void)
         v1 = (y1 - yt) / (ybot - yt) * vmax;
 
         sh = (int)(0x80 * shade(dist) * (side ? 0.72f : 1.0f));
-        gsKit_prim_sprite_texture(gs, &walltex[type - 1],
+        if (type == 5) {
+            float p = doorOpen[my][mx];
+            tex = &doortex[p < 0.25f ? 0 : (p < 0.5f ? 1 : (p < 0.75f ? 2 : 3))];
+        } else tex = &walltex[type - 1];
+        gsKit_prim_sprite_texture(gs, tex,
             (float)(c * COLW), y0, (float)texX, v0,
             (float)(c * COLW + COLW), y1, (float)texX + 1.0f, v1,
             1, rgba(sh, sh, sh, 0x80));
@@ -947,15 +1125,14 @@ static void draw_sprites(void)
         } else {
             const Item *it = &items[list[i].idx];
             float lift = 0.0f;
-            if (it->type >= IT_W_SHOT && it->type <= IT_W_FLAME) {
-                draw_billboard(&wtex[WBASE[it->type - IT_W_SHOT + 2] + 1], WEAPON_SIZE,
-                               it->x, it->y, 0.42f, 0.05f);
-            } else if (it->type == IT_DROP || it->type == IT_DROP_SH) {
-                draw_billboard(&itemtex[it->type == IT_DROP ? IT_AMMO_BUL : IT_AMMO_SHELL], ITEM_SIZE,
-                               it->x, it->y, 0.28f, 0.0f);
+            if (it->delay > 0 && (frameCount & 4)) continue;      /* parpadea al soltarla */
+            if (it->type >= IT_W_KNIFE) {
+                draw_billboard(&wtex[WBASE[it->type - IT_W_KNIFE] + 1], WEAPON_SIZE,
+                               it->x, it->y, 0.46f, 0.05f);
             } else {
+                float sc = (it->val == 1 && it->type >= IT_AMMO_PIS && it->type <= IT_AMMO_FUEL) ? 0.26f : 0.38f;
                 if (it->type >= IT_KEY_B) lift = 0.12f + 0.05f * sinf(frameCount * 0.08f);
-                draw_billboard(&itemtex[it->type], ITEM_SIZE, it->x, it->y, 0.4f, lift);
+                draw_billboard(&itemtex[it->type], ITEM_SIZE, it->x, it->y, sc, lift);
             }
         }
     }
@@ -984,6 +1161,7 @@ static void draw_weapon(void)
         }
     } else if (w->cd <= 8) {
         if (wtime < w->cd) frame = (shots & 1) ? 2 : 3;
+        else if (weapon == 7) frame = (frameCount / 3) & 1;      /* motosierra en reposo vibra */
     } else {
         if (wtime < 5) frame = 2; else if (wtime < 11) frame = 3;
     }
@@ -1043,6 +1221,9 @@ static const char *glyph(char ch)
     case ':': return "      ##        ##       ";
     case '-': return "          #####          ";
     case '/': return "    #   #   #   #   #    ";
+    case '<': return "   # " "  #  " " #   " "  #  " "   # ";
+    case '>': return " #   " "  #  " "   # " "  #  " " #   ";
+    case ',': return "     " "     " "     " "  #  " " #   ";
     default: return NULL;
     }
 }
@@ -1091,7 +1272,6 @@ static void draw_hud(void)
 {
     int i, alive = enemies_alive(), at = WEAP[weapon].atype;
     float m = 24.0f;
-    static const int kc[3][3] = { { 50, 100, 240 }, { 240, 210, 40 }, { 230, 50, 50 } };
 
     stat_row("HP", health, 100, SH - m - 36.0f, 210, 20, 20);
     stat_row("AR", armor, 100, SH - m - 14.0f, 50, 120, 230);
@@ -1117,17 +1297,26 @@ static void draw_hud(void)
         }
     }
 
-    /* armas */
-    for (i = 0; i < WEAPON_COUNT; i++) {
-        float x = m + i * 16.0f, y = m;
-        u64 c = (i == weapon) ? rgba(255, 220, 40, 0x80) : (have[i] ? rgba(200, 200, 200, 0x80) : rgba(70, 70, 70, 0x60));
-        rect(x, y, x + 12, y + 12, c);
+    /* armas que llevamos (maximo 3) */
+    {
+        int k = 0;
+        for (i = 0; i < WEAPON_COUNT; i++) {
+            u64 c;
+            if (!have[i]) continue;
+            c = (i == weapon) ? rgba(255, 220, 40, 0x80) : rgba(190, 190, 190, 0x80);
+            draw_text_shadow(WNAME[i], m + (i == weapon ? 10.0f : 0.0f), m + k * 15.0f, 2.0f, c);
+            k++;
+        }
     }
     /* llaves */
     for (i = 0; i < 3; i++) {
-        float x = m + i * 22.0f, y = m + 20.0f;
-        if (haveKey[i]) rect(x, y, x + 18, y + 11, rgba(kc[i][0], kc[i][1], kc[i][2], 0x80));
-        else            rect(x, y, x + 18, y + 11, rgba(60, 60, 60, 0x50));
+        float x = m + i * 28.0f, y = m + 52.0f;
+        if (haveKey[i]) {
+            gsKit_prim_sprite_texture(gs, &itemtex[IT_KEY_B + i], x, y, 0.0f, 0.0f, x + 24, y + 24,
+                                      (float)ITEM_SIZE, (float)ITEM_SIZE, 1, rgba(0x80, 0x80, 0x80, 0x80));
+        } else {
+            rect(x + 2, y + 9, x + 22, y + 15, rgba(60, 60, 60, 0x50));
+        }
     }
     /* enemigos que quedan */
     {
@@ -1143,7 +1332,7 @@ static void draw_hud(void)
     rect(SW / 2.0f + 3, SH / 2.0f - 1, SW / 2.0f + 9, SH / 2.0f + 1, rgba(255, 255, 255, 0x60));
 
     /* mensaje */
-    if (msgTimer > 0 && msgText[0]) {
+    if (msgTimer > 0 && msgText[0] && gameState != G_PAUSE) {
         draw_text_shadow(msgText, (SW - text_width(msgText, 3.0f)) / 2.0f, SH * 0.22f, 3.0f, rgba(255, 255, 255, 0x80));
     }
 }
@@ -1170,14 +1359,103 @@ static void draw_overlay(void)
     }
 }
 
+static void draw_centered(const char *t, float y, float sc, int sel)
+{
+    u64 c = sel ? rgba(255, 220, 40, 0x80) : rgba(205, 205, 205, 0x80);
+    float x = (SW - text_width(t, sc)) / 2.0f;
+    draw_text_shadow(t, x, y, sc, c);
+    if (sel) {
+        draw_text_shadow(">", x - 8.0f * sc, y, sc, c);
+        draw_text_shadow("<", x + text_width(t, sc) + 3.0f * sc, y, sc, c);
+    }
+}
+
+static void draw_slider(float x, float y, int v, int maxv)
+{
+    int i;
+    for (i = 0; i < maxv; i++) {
+        float bx = x + i * 15.0f;
+        rect(bx, y, bx + 12, y + 15, i < v ? rgba(255, 220, 40, 0x80) : rgba(70, 70, 70, 0x80));
+    }
+    draw_number(v, x + maxv * 15.0f + 10.0f, y, 3.0f, rgba(255, 255, 255, 0x80));
+}
+
+static void menu_draw(void)
+{
+    static const char *const mainItems[4]  = { "INICIAR JUEGO", "OPCIONES", "CONTROLES", "SALIR" };
+    static const char *const diffItems[4]  = { "FACIL", "MEDIO", "DIFICIL", "VOLVER" };
+    static const char *const pauseItems[4] = { "CONTINUAR", "OPCIONES", "CONTROLES", "MENU PRINCIPAL" };
+    const char *hint = "X ACEPTAR    O VOLVER";
+    float H = (float)SH, W = (float)SW;
+    int i;
+
+    if (gameState == G_MENU) {
+        gsKit_prim_sprite_texture(gs, &titletex, 0.0f, 0.0f, 0.0f, 0.0f, W, H, 512.0f, 352.0f,
+                                  1, rgba(0x80, 0x80, 0x80, 0x80));
+    } else {
+        rect(0, 0, W, H, rgba(0, 0, 0, 0x78));
+    }
+
+    switch (menuScreen) {
+    case M_MAIN: case M_PAUSE: {
+        const char *const *it = (menuScreen == M_MAIN) ? mainItems : pauseItems;
+        float y0 = H * 0.54f;
+        if (menuScreen == M_PAUSE) { y0 = H * 0.30f; draw_centered("PAUSA", H * 0.16f, 5.0f, 0); }
+        rect(W * 0.25f, y0 - 10, W * 0.75f, y0 + 4 * 34.0f + 2, rgba(0, 0, 0, 0x55));
+        for (i = 0; i < 4; i++) draw_centered(it[i], y0 + i * 34.0f, 3.0f, i == menuSel);
+        break;
+    }
+    case M_DIFF: {
+        float y0 = H * 0.58f;
+        rect(W * 0.25f, H * 0.49f, W * 0.75f, y0 + 4 * 32.0f, rgba(0, 0, 0, 0x55));
+        draw_centered("DIFICULTAD", H * 0.51f, 2.0f, 0);
+        for (i = 0; i < 4; i++) draw_centered(diffItems[i], y0 + i * 32.0f, 3.0f, i == menuSel);
+        break;
+    }
+    case M_OPT: {
+        float y0 = H * 0.58f, xl = W * 0.14f, xv = W * 0.50f;
+        rect(W * 0.10f, H * 0.49f, W * 0.90f, y0 + 3 * 36.0f, rgba(0, 0, 0, 0x55));
+        draw_centered("OPCIONES", H * 0.51f, 2.0f, 0);
+        draw_text_shadow("SENSIBILIDAD", xl, y0, 3.0f, menuSel == 0 ? rgba(255, 220, 40, 0x80) : rgba(205, 205, 205, 0x80));
+        draw_slider(xv + 40.0f, y0, sens, 10);
+        draw_text_shadow("SONIDO", xl, y0 + 36.0f, 3.0f, menuSel == 1 ? rgba(255, 220, 40, 0x80) : rgba(205, 205, 205, 0x80));
+        draw_slider(xv + 40.0f, y0 + 36.0f, volume, 10);
+        draw_centered("VOLVER", y0 + 72.0f, 3.0f, menuSel == 2);
+        hint = "ARRIBA ABAJO ELEGIR    IZQ DER CAMBIAR";
+        break;
+    }
+    case M_CTRL: {
+        float y0 = H * 0.525f, rh = 18.0f, xl = W * 0.14f, xv = W * 0.52f;
+        rect(W * 0.10f, H * 0.445f, W * 0.90f, y0 + (NACT + 2) * rh + 4, rgba(0, 0, 0, 0x60));
+        draw_centered("CONTROLES", H * 0.46f, 2.0f, 0);
+        for (i = 0; i < NACT; i++) {
+            u64 c = (i == menuSel) ? rgba(255, 220, 40, 0x80) : rgba(205, 205, 205, 0x80);
+            draw_text_shadow(ACT_NAME[i], xl, y0 + i * rh, 2.0f, c);
+            if (rebind == i) {
+                if ((frameCount / 15) & 1) draw_text_shadow("PRESIONA UN BOTON", xv, y0 + i * rh, 2.0f, rgba(120, 220, 255, 0x80));
+            } else {
+                draw_text_shadow(btn_name(bind[i]), xv, y0 + i * rh, 2.0f, c);
+            }
+        }
+        draw_centered("RESTAURAR", y0 + NACT * rh, 2.0f, menuSel == NACT);
+        draw_centered("VOLVER", y0 + (NACT + 1) * rh, 2.0f, menuSel == NACT + 1);
+        hint = (rebind >= 0) ? "START CANCELA" : "X CAMBIAR BOTON    O VOLVER";
+        break;
+    }
+    }
+    draw_text_shadow(hint, (W - text_width(hint, 2.0f)) / 2.0f, H - 22.0f, 2.0f, rgba(200, 200, 200, 0x80));
+}
+
 static void game_render(void)
 {
     gsKit_clear(gs, rgba(0, 0, 0, 0x80));
+    if (gameState == G_MENU) { menu_draw(); return; }
     draw_world();
     draw_sprites();
     draw_weapon();
     draw_hud();
     draw_overlay();
+    if (gameState == G_PAUSE) menu_draw();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1207,10 +1485,10 @@ static int b64_decode(const char *s, unsigned char *out)
 
 /* Texturas con paleta de 256 colores (PSM T8): 4 veces menos VRAM que RGBA32.
    Las usamos para armas y enemigos, que son muchas. */
-static void load_sheet8(const char *b64, int nframes, int size, GSTEXTURE *out)
+static void load_tex8(const char *b64, int nframes, int tw, int th, GSTEXTURE *out)
 {
     int blen = (int)(strlen(b64) / 4 * 3 + 8);
-    int total = nframes * size * size;
+    int total = nframes * tw * th;
     unsigned char *raw = (unsigned char *)malloc(blen);
     unsigned char *idx = (unsigned char *)memalign(128, total);
     u32 *clut = (u32 *)memalign(128, 256 * 4);
@@ -1238,18 +1516,23 @@ static void load_sheet8(const char *b64, int nframes, int size, GSTEXTURE *out)
     vclut = gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
     for (f = 0; f < nframes; f++) {
         memset(&out[f], 0, sizeof(GSTEXTURE));
-        out[f].Width = size;
-        out[f].Height = size;
+        out[f].Width = tw;
+        out[f].Height = th;
         out[f].PSM = GS_PSM_T8;
         out[f].ClutPSM = GS_PSM_CT32;
-        out[f].Mem = (void *)(idx + f * size * size);
+        out[f].Mem = (void *)(idx + f * tw * th);
         out[f].Clut = clut;
         out[f].VramClut = vclut;
         out[f].Filter = GS_FILTER_NEAREST;
-        out[f].Vram = gsKit_vram_alloc(gs, gsKit_texture_size(size, size, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
+        out[f].Vram = gsKit_vram_alloc(gs, gsKit_texture_size(tw, th, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
         gsKit_texture_upload(gs, &out[f]);
     }
     free(raw);
+}
+
+static void load_sheet8(const char *b64, int nframes, int size, GSTEXTURE *out)
+{
+    load_tex8(b64, nframes, size, size, out);
 }
 
 static void load_sheet(const char *b64, int nframes, int size, GSTEXTURE *out)
@@ -1329,35 +1612,49 @@ static float stick(int v)
 static void read_input(Input *in)
 {
     struct padButtonStatus b;
-    u32 p;
-    static u32 last = 0;
+    u32 p, pm, edge;
+    static u32 last = 0, lastm = 0;
+    static int rep = 0;
     int st;
+    const u32 dirs = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT;
 
     memset(in, 0, sizeof(*in));
+    padPress = 0;
     if (!padOk) return;
     st = padGetState(0, 0);
     if (st != PAD_STATE_STABLE && st != PAD_STATE_FINDCTP1) return;
     if (padRead(0, 0, &b) == 0) return;
     p = 0xffff ^ b.btns;
+    pm = p;
 
     if ((b.mode >> 4) == 7) { /* DualShock: sticks analogicos activos */
         in->fwd    = -stick(b.ljoy_v);
         in->strafe =  stick(b.ljoy_h);
         in->turn   =  stick(b.rjoy_h);
+        if (b.ljoy_v < 60)  pm |= PAD_UP;
+        if (b.ljoy_v > 196) pm |= PAD_DOWN;
+        if (b.ljoy_h < 60)  pm |= PAD_LEFT;
+        if (b.ljoy_h > 196) pm |= PAD_RIGHT;
     }
     if (p & PAD_UP)     in->fwd += 1.0f;
     if (p & PAD_DOWN)   in->fwd -= 1.0f;
     if (p & PAD_LEFT)   in->turn -= 1.0f;
     if (p & PAD_RIGHT)  in->turn += 1.0f;
-    if (p & PAD_SQUARE) in->strafe -= 1.0f;
-    if (p & PAD_CIRCLE) in->strafe += 1.0f;
-    if (p & (PAD_CROSS | PAD_R2)) in->fire = 1;
-    in->reload = ((p & PAD_TRIANGLE) && !(last & PAD_TRIANGLE));
+    if (p & bind[A_LEFT])  in->strafe -= 1.0f;
+    if (p & bind[A_RIGHT]) in->strafe += 1.0f;
+    if (p & (bind[A_FIRE] | bind[A_FIRE2])) in->fire = 1;
 
-    in->prev  = ((p & PAD_L1) && !(last & PAD_L1));
-    in->next  = ((p & PAD_R1) && !(last & PAD_R1));
-    in->start = ((p & PAD_START) && !(last & PAD_START));
-    last = p;
+    edge = p & ~last;
+    in->reload = (edge & bind[A_RELOAD]) != 0;
+    in->prev   = (edge & bind[A_PREV]) != 0;
+    in->next   = (edge & bind[A_NEXT]) != 0;
+    in->swap   = (edge & bind[A_SWAP]) != 0;
+    in->start  = (edge & PAD_START) != 0;
+
+    /* botones para los menus (con repeticion al mantener) */
+    padPress = pm & ~lastm;
+    if (pm & dirs) { rep++; if (rep > 18 && (rep & 3) == 0) padPress |= pm & dirs; } else rep = 0;
+    last = p; lastm = pm;
 
     if (in->fwd > 1.0f) in->fwd = 1.0f;
     if (in->fwd < -1.0f) in->fwd = -1.0f;
@@ -1398,7 +1695,7 @@ int main(int argc, char **argv)
     if (ncols > MAXCOLS) ncols = MAXCOLS;
 
     {
-        static const char *const wsheet[WEAPON_COUNT] = { w0_b64, w1_b64, w2_b64, w3_b64, w4_b64, w5_b64, w6_b64 };
+        static const char *const wsheet[WEAPON_COUNT] = { w0_b64, w1_b64, w2_b64, w3_b64, w4_b64, w5_b64, w6_b64, w7_b64 };
         int i;
         for (i = 0; i < WEAPON_COUNT; i++) load_sheet8(wsheet[i], WNF[i], WEAPON_SIZE, &wtex[WBASE[i]]);
     }
@@ -1406,9 +1703,14 @@ int main(int argc, char **argv)
     load_sheet8(enemy2_b64, ENEMY_FRAMES, ENEMY_SIZE, etex + ENEMY_FRAMES);
     load_sheet(walls_b64, WALL_TEXTURES, WALL_SIZE, walltex);
     load_sheet(items_b64, ITEM_TEXTURES, ITEM_SIZE, itemtex);
+    load_sheet(doors_b64, DOOR_FRAMES, WALL_SIZE, doortex);
+    load_tex8(title_b64, 1, TITLE_W, TITLE_H, &titletex);
+    titletex.Filter = GS_FILTER_LINEAR;
 
+    memcpy(bind, BIND_DEF, sizeof(bind));
     srand(12345);
     reset_game();
+    gameState = G_MENU; menuScreen = M_MAIN; menuSel = 0;
 
     for (;;) {
         read_input(&in);
