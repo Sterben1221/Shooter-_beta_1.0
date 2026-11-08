@@ -8,6 +8,7 @@
  *   Cuadrado / Circulo ................ moverse de lado
  *   X o R2 ............................ disparar
  *   L1 / R1 ........................... cambiar de arma
+ *   TRIANGULO ......................... recargar
  *   START ............................. reiniciar (al morir o ganar)
  * Las puertas se abren al acercarte (las de color piden su llave).
  * La salida es la puerta verde EXIT, detras de la puerta roja.
@@ -34,8 +35,12 @@
 
 /* Tipos de item (los 8 primeros coinciden con el icono de items_b64) */
 enum { IT_MEDKIT, IT_VEST, IT_AMMO_BUL, IT_AMMO_ROCK, IT_AMMO_FUEL,
-       IT_KEY_B, IT_KEY_Y, IT_KEY_R,
-       IT_W_MP, IT_W_CHAIN, IT_W_ROCKET, IT_W_FLAME, IT_DROP };
+       IT_KEY_B, IT_KEY_Y, IT_KEY_R, IT_AMMO_SHELL,
+       IT_W_SHOT, IT_W_MP, IT_W_CHAIN, IT_W_ROCKET, IT_W_FLAME,
+       IT_DROP, IT_DROP_SH };
+
+/* Armas: 0 cuchillo, 1 pistola, 2 escopeta, 3 metralleta, 4 ametralladora, 5 lanzacohetes, 6 lanzallamas */
+/* Municion de reserva: 0 balas, 1 cohetes, 2 combustible, 3 cartuchos */
 
 #include "level.h"   /* mapa, enemigos e items (generado por tools/make_level.py) */
 
@@ -54,7 +59,7 @@ enum { G_PLAY, G_DEAD, G_WIN };
 
 typedef struct {
     float x, y, face, homeX, homeY, homeFace;
-    int hp, state, timer, frame, cool, lost;
+    int hp, state, timer, frame, cool, lost, type;
 } Enemy;
 
 typedef struct { float x, y; int type, active, val; } Item;
@@ -63,24 +68,37 @@ typedef struct {
     int dmg, cd;
     float range, tol;
     int multi, splash, noise;
+    int mag, reload, atype, falloff;   /* cargador, cuadros de recarga, tipo de municion, dano baja con la distancia */
 } Weapon;
 
 typedef struct {
     float fwd, strafe, turn;
-    int fire, prev, next, start;
+    int fire, prev, next, start, reload;
 } Input;
 
 static const Weapon WEAP[WEAPON_COUNT] = {
-    /* dmg cd  alcance tol   multi splash ruido */
-    {  2, 22,  1.7f, 0.0f,  0,    0,     0 },  /* cuchillo        */
-    {  2, 24, 14.0f, 0.0f,  0,    0,     1 },  /* pistola         */
-    {  1,  8, 14.0f, 0.0f,  0,    0,     1 },  /* metralleta      */
-    {  1,  4, 14.0f, 0.0f,  0,    0,     1 },  /* ametralladora   */
-    {  6, 70, 16.0f, 0.0f,  0,    3,     1 },  /* lanzacohetes    */
-    {  1,  4,  6.0f, 0.35f, 1,    0,     1 },  /* lanzallamas     */
+    /* dmg cd  alcance tol    multi splash ruido cargador recarga municion falloff */
+    {  2, 22,  1.7f, 0.0f,   0,    0,     0,    0,       0,      -1,      0 },  /* cuchillo        */
+    {  2, 24, 14.0f, 0.0f,   0,    0,     1,    7,      80,       0,      0 },  /* pistola         */
+    {  7, 45,  9.0f, 0.20f,  1,    0,     1,    2,     100,       3,      1 },  /* escopeta        */
+    {  1,  8, 14.0f, 0.0f,   0,    0,     1,   30,     110,       0,      0 },  /* metralleta      */
+    {  1,  4, 14.0f, 0.0f,   0,    0,     1,  100,     200,       0,      0 },  /* ametralladora   */
+    {  6, 70, 16.0f, 0.0f,   0,    3,     1,    1,      70,       1,      0 },  /* lanzacohetes    */
+    {  1,  4,  6.0f, 0.35f,  1,    0,     1,   50,     120,       2,      0 },  /* lanzallamas     */
 };
-static const int AMMO_TYPE[WEAPON_COUNT] = { -1, 0, 0, 0, 1, 2 };  /* balas, cohetes, combustible */
-static const int AMMO_MAX[3] = { 200, 20, 100 };
+#define AMMO_TYPES 4
+static const int AMMO_MAX[AMMO_TYPES] = { 200, 20, 100, 40 };
+static const char *AMMO_NAME[AMMO_TYPES] = { "BULLETS", "ROCKETS", "FUEL", "SHELLS" };
+
+/* Cuadros de textura de cada arma (cuantos tiene cada una y donde empieza) */
+static const int WNF[WEAPON_COUNT]   = { 4, 8, 8, 4, 4, 4, 4 };
+static const int WBASE[WEAPON_COUNT] = { 0, 4, 12, 20, 24, 28, 32 };
+
+/* Enemigos: 0 soldado blanco, 1 soldado verde (mas duro) */
+static const int   EHP[ENEMY_TYPES]    = { 6, 9 };
+static const float ESPEED[ENEMY_TYPES] = { 0.025f, 0.030f };
+static const int   EDMG[ENEMY_TYPES]   = { 6, 9 };
+static const int   ECOOL[ENEMY_TYPES]  = { 40, 26 };
 
 /* ------------------------------------------------------------------ */
 /* Estado global                                                       */
@@ -98,13 +116,14 @@ static int nItems;
 
 static float px, py, pa, bob, stepAcc;
 static int health, armor, weapon, wcool, wtime, shots, hurtFlash, gameState, frameCount;
-static int have[WEAPON_COUNT], ammo[3], haveKey[3], kills;
+static int have[WEAPON_COUNT], ammo[AMMO_TYPES], mag[WEAPON_COUNT], haveKey[3], kills;
+static int reloading, rtime;
 static char msgText[40];
 static int msgTimer;
 
 static GSGLOBAL *gs;
-static GSTEXTURE wtex[WEAPON_COUNT * WEAPON_FRAMES];
-static GSTEXTURE etex[ENEMY_FRAMES];
+static GSTEXTURE wtex[WEAPON_TOTAL];
+static GSTEXTURE etex[ENEMY_FRAMES * ENEMY_TYPES];
 static GSTEXTURE walltex[WALL_TEXTURES];
 static GSTEXTURE itemtex[ITEM_TEXTURES];
 static int SW = 640, SH = 448, ncols = 160;
@@ -297,11 +316,19 @@ static int add_ammo(int type, int n)
     return 1;
 }
 
+static void select_weapon(int w)
+{
+    weapon = w; wcool = 8; wtime = 100;
+    reloading = 0;                    /* cambiar de arma cancela la recarga */
+}
+
 static int give_weapon(int w, int n)
 {
+    int first = !have[w];
     have[w] = 1;
-    add_ammo(AMMO_TYPE[w], n);
-    if (w > weapon) { weapon = w; wcool = 8; wtime = 100; }
+    if (mag[w] == 0 && WEAP[w].mag > 0) mag[w] = WEAP[w].mag;   /* la primera vez viene cargada */
+    if (WEAP[w].atype >= 0) add_ammo(WEAP[w].atype, n);
+    if (first && w > weapon) select_weapon(w);
     return 1;
 }
 
@@ -316,26 +343,30 @@ static int pickup(Item *it)
         if (armor >= 100) return 0;
         armor += 50; if (armor > 100) armor = 100;
         setmsg("VEST"); return 1;
-    case IT_AMMO_BUL:  if (!add_ammo(0, 20)) return 0; setmsg("BULLETS"); return 1;
-    case IT_AMMO_ROCK: if (!add_ammo(1, 4))  return 0; setmsg("ROCKETS"); return 1;
-    case IT_AMMO_FUEL: if (!add_ammo(2, 25)) return 0; setmsg("FUEL"); return 1;
-    case IT_DROP:      if (!add_ammo(0, it->val)) return 0; return 1;
+    case IT_AMMO_BUL:   if (!add_ammo(0, 20)) return 0; setmsg("BULLETS"); return 1;
+    case IT_AMMO_ROCK:  if (!add_ammo(1, 4))  return 0; setmsg("ROCKETS"); return 1;
+    case IT_AMMO_FUEL:  if (!add_ammo(2, 25)) return 0; setmsg("FUEL"); return 1;
+    case IT_AMMO_SHELL: if (!add_ammo(3, 8))  return 0; setmsg("SHELLS"); return 1;
+    case IT_DROP:       if (!add_ammo(0, it->val)) return 0; return 1;
+    case IT_DROP_SH:    if (!add_ammo(3, 4)) return 0; return 1;
     case IT_KEY_B: haveKey[0] = 1; setmsg("BLUE KEY"); return 1;
     case IT_KEY_Y: haveKey[1] = 1; setmsg("YELLOW KEY"); return 1;
     case IT_KEY_R: haveKey[2] = 1; setmsg("RED KEY"); return 1;
-    case IT_W_MP:     give_weapon(2, 30); setmsg("SMG"); return 1;
-    case IT_W_CHAIN:  give_weapon(3, 40); setmsg("CHAINGUN"); return 1;
-    case IT_W_ROCKET: give_weapon(4, 5);  setmsg("ROCKET LAUNCHER"); return 1;
-    case IT_W_FLAME:  give_weapon(5, 40); setmsg("FLAMETHROWER"); return 1;
+    case IT_W_SHOT:   give_weapon(2, 8);  setmsg("SHOTGUN"); return 1;
+    case IT_W_MP:     give_weapon(3, 30); setmsg("SMG"); return 1;
+    case IT_W_CHAIN:  give_weapon(4, 60); setmsg("CHAINGUN"); return 1;
+    case IT_W_ROCKET: give_weapon(5, 5);  setmsg("ROCKET LAUNCHER"); return 1;
+    case IT_W_FLAME:  give_weapon(6, 40); setmsg("FLAMETHROWER"); return 1;
     }
     return 0;
 }
 
+/* Se puede usar si la tenemos y queda municion (en el cargador o de reserva) */
 static int weapon_usable(int w)
 {
     if (!have[w]) return 0;
-    if (AMMO_TYPE[w] < 0) return 1;
-    return ammo[AMMO_TYPE[w]] > 0;
+    if (WEAP[w].atype < 0) return 1;
+    return mag[w] > 0 || ammo[WEAP[w].atype] > 0;
 }
 
 static void cycle_weapon(int dir)
@@ -343,8 +374,27 @@ static void cycle_weapon(int dir)
     int i, w = weapon;
     for (i = 0; i < WEAPON_COUNT; i++) {
         w = (w + dir + WEAPON_COUNT) % WEAPON_COUNT;
-        if (weapon_usable(w)) { weapon = w; wcool = 8; wtime = 100; return; }
+        if (weapon_usable(w)) { select_weapon(w); return; }
     }
+}
+
+static void start_reload(void)
+{
+    const Weapon *w = &WEAP[weapon];
+    if (reloading || w->mag <= 0) return;
+    if (mag[weapon] >= w->mag) return;
+    if (ammo[w->atype] <= 0) return;
+    reloading = 1; rtime = 0;
+}
+
+static void finish_reload(void)
+{
+    const Weapon *w = &WEAP[weapon];
+    int need = w->mag - mag[weapon];
+    int take = ammo[w->atype] < need ? ammo[w->atype] : need;
+    mag[weapon] += take;
+    ammo[w->atype] -= take;
+    reloading = 0; wcool = 6; wtime = 100;
 }
 
 static void damage_player(int dmg)
@@ -384,7 +434,8 @@ static void reset_game(void)
         e->x = e->homeX = ENEMY_DEFS[i][0] + 0.5f;
         e->y = e->homeY = ENEMY_DEFS[i][1] + 0.5f;
         e->face = e->homeFace = ENEMY_DEFS[i][2] * PI_F / 180.0f;
-        e->hp = 6; e->state = E_IDLE; e->frame = 0;
+        e->type = ENEMY_DEFS[i][3];
+        e->hp = EHP[e->type]; e->state = E_IDLE; e->frame = 0;
         e->timer = (i * 37) % 500;   /* para que no giren todos a la vez */
     }
     for (i = 0; i < N_ITEM_DEFS; i++)
@@ -392,8 +443,10 @@ static void reset_game(void)
 
     pa = 0.0f; bob = 0.0f; stepAcc = 0.0f;
     health = 100; armor = 0; kills = 0;
-    memset(have, 0, sizeof(have)); memset(ammo, 0, sizeof(ammo)); memset(haveKey, 0, sizeof(haveKey));
-    have[0] = 1; have[1] = 1; ammo[0] = 30; weapon = 1;
+    memset(have, 0, sizeof(have)); memset(ammo, 0, sizeof(ammo)); memset(mag, 0, sizeof(mag));
+    memset(haveKey, 0, sizeof(haveKey));
+    have[0] = 1; have[1] = 1; mag[1] = WEAP[1].mag; ammo[0] = 30; weapon = 1;
+    reloading = 0; rtime = 0;
     wcool = 0; wtime = 100; shots = 0;
     hurtFlash = 0; gameState = G_PLAY;
     setmsg("FIND THE EXIT");
@@ -419,7 +472,7 @@ static void hurt_enemy(Enemy *e, int dmg)
     if (e->hp <= 0) {
         e->state = E_DEAD;
         kills++;
-        if (rand() % 3) spawn_item(e->x, e->y, IT_DROP, 10);
+        if (rand() % 3) spawn_item(e->x, e->y, (rand() % 4 == 0) ? IT_DROP_SH : IT_DROP, 10);
     } else {
         e->state = E_PAIN;
     }
@@ -451,8 +504,14 @@ static void player_shoot(void)
         tol = (w->tol > 0.0f) ? w->tol : atanf(0.30f / d);
         if (ang > tol) continue;
         if (!los(px, py, e->x, e->y)) continue;
-        if (w->multi) hurt_enemy(e, w->dmg);
-        else if (d < bestd) { bestd = d; best = i; }
+        if (w->multi) {
+            int dmg = w->dmg;
+            if (w->falloff) {
+                dmg = (int)(w->dmg * (1.0f - 0.7f * d / w->range) + 0.5f);
+                if (dmg < 1) dmg = 1;
+            }
+            hurt_enemy(e, dmg);
+        } else if (d < bestd) { bestd = d; best = i; }
     }
 
     if (best >= 0) {
@@ -547,7 +606,7 @@ static void enemy_update(Enemy *e)
             float tx, ty;
             if (see) { tx = px; ty = py; }
             else best_neighbor(e, dmap, &tx, &ty);
-            enemy_step_toward(e, tx, ty, 0.025f);
+            enemy_step_toward(e, tx, ty, ESPEED[e->type]);
             if (!see) turn_toward(&e->face, atan2f(ty - e->y, tx - e->x), 0.12f);
         }
         break;
@@ -579,11 +638,11 @@ static void enemy_update(Enemy *e)
         if (e->timer == 16) {
             int chance = (int)(90.0f - d * 8.0f);
             if (chance < 20) chance = 20;
-            if (los(e->x, e->y, px, py) && (rand() % 100) < chance) damage_player(6 + rand() % 7);
+            if (los(e->x, e->y, px, py) && (rand() % 100) < chance) damage_player(EDMG[e->type] + rand() % 7);
         }
         if (e->timer >= 26) {
             e->state = E_CHASE; e->timer = 0;
-            e->cool = 40 + rand() % 40;
+            e->cool = ECOOL[e->type] + rand() % 40;
         }
         break;
 
@@ -675,20 +734,25 @@ static void game_update(const Input *in)
     wtime++;
     if (in->prev && wcool == 0) cycle_weapon(-1);
     if (in->next && wcool == 0) cycle_weapon(1);
-    if (in->fire && wcool == 0) {
-        int at = AMMO_TYPE[weapon];
-        if (at >= 0 && ammo[at] <= 0) {
-            setmsg("NO AMMO");
-            cycle_weapon(-1);
-            wcool = 15;
-        } else {
-            if (at >= 0) ammo[at]--;
-            player_shoot();
-            wcool = WEAP[weapon].cd;
-            wtime = 0;
-            shots++;
-            if (at >= 0 && ammo[at] <= 0 && !weapon_usable(weapon)) {
+    if (in->reload) start_reload();
+    if (reloading) {
+        rtime++;
+        if (rtime >= WEAP[weapon].reload) finish_reload();
+    } else if (wcool == 0) {
+        const Weapon *w = &WEAP[weapon];
+        if (w->mag > 0 && mag[weapon] == 0 && ammo[w->atype] > 0) {
+            start_reload();                       /* cargador vacio: recarga sola */
+        } else if (in->fire) {
+            if (w->mag > 0 && mag[weapon] <= 0) {  /* sin balas en el cargador ni de reserva */
                 setmsg("NO AMMO");
+                cycle_weapon(-1);
+                wcool = 15;
+            } else {
+                if (w->mag > 0) mag[weapon]--;
+                player_shoot();
+                wcool = w->cd;
+                wtime = 0;
+                shots++;
             }
         }
     }
@@ -879,15 +943,16 @@ static void draw_sprites(void)
     for (i = 0; i < n; i++) {
         if (list[i].kind == 0) {
             const Enemy *e = &enemies[list[i].idx];
-            draw_billboard(&etex[enemy_frame_index(e)], ENEMY_SIZE, e->x, e->y, 1.0f, 0.0f);
+            draw_billboard(&etex[e->type * ENEMY_FRAMES + enemy_frame_index(e)], ENEMY_SIZE, e->x, e->y, 1.0f, 0.0f);
         } else {
             const Item *it = &items[list[i].idx];
             float lift = 0.0f;
-            if (it->type >= IT_W_MP && it->type <= IT_W_FLAME) {
-                draw_billboard(&wtex[(it->type - IT_W_MP + 2) * WEAPON_FRAMES], WEAPON_SIZE,
+            if (it->type >= IT_W_SHOT && it->type <= IT_W_FLAME) {
+                draw_billboard(&wtex[WBASE[it->type - IT_W_SHOT + 2] + 1], WEAPON_SIZE,
                                it->x, it->y, 0.42f, 0.05f);
-            } else if (it->type == IT_DROP) {
-                draw_billboard(&itemtex[IT_AMMO_BUL], ITEM_SIZE, it->x, it->y, 0.28f, 0.0f);
+            } else if (it->type == IT_DROP || it->type == IT_DROP_SH) {
+                draw_billboard(&itemtex[it->type == IT_DROP ? IT_AMMO_BUL : IT_AMMO_SHELL], ITEM_SIZE,
+                               it->x, it->y, 0.28f, 0.0f);
             } else {
                 if (it->type >= IT_KEY_B) lift = 0.12f + 0.05f * sinf(frameCount * 0.08f);
                 draw_billboard(&itemtex[it->type], ITEM_SIZE, it->x, it->y, 0.4f, lift);
@@ -898,21 +963,36 @@ static void draw_sprites(void)
 
 static void draw_weapon(void)
 {
-    int frame = 0;
+    int frame = 1;
     float size = WEAPON_SIZE * 2.4f * (SH / 448.0f);
-    float x, y, bx, by;
+    float x, y, bx, by, sink = 0.0f;
     const Weapon *w = &WEAP[weapon];
 
-    if (w->cd <= 8) {
-        if (wtime < w->cd) frame = (shots & 1) ? 1 : 2;
+    if (reloading) {
+        float t = (float)rtime / (float)w->reload;
+        if (weapon == 1 || weapon == 2) {
+            /* animaciones propias: pistola y escopeta (cuadros 4..7) */
+            static const float cut[2][3] = { { 0.15f, 0.45f, 0.75f }, { 0.25f, 0.55f, 0.75f } };
+            const float *c = cut[weapon - 1];
+            int k = (t < c[0]) ? 0 : (t < c[1]) ? 1 : (t < c[2]) ? 2 : 3;
+            frame = 4 + k;
+        } else {
+            /* las demas armas bajan, se recargan fuera de pantalla y suben */
+            float u = (t < 0.25f) ? t / 0.25f : (t > 0.75f ? (1.0f - t) / 0.25f : 1.0f);
+            frame = 1;
+            sink = u * size * 0.95f;
+        }
+    } else if (w->cd <= 8) {
+        if (wtime < w->cd) frame = (shots & 1) ? 2 : 3;
     } else {
-        if (wtime < 5) frame = 1; else if (wtime < 11) frame = 2;
+        if (wtime < 5) frame = 2; else if (wtime < 11) frame = 3;
     }
     bx = sinf(bob) * 8.0f;
     by = fabsf(cosf(bob)) * 8.0f;
+    if (reloading) { bx = 0.0f; by = 0.0f; }
     x = SW / 2.0f - size / 2.0f + bx;
-    y = SH - size + 10.0f + by;
-    gsKit_prim_sprite_texture(gs, &wtex[weapon * WEAPON_FRAMES + frame],
+    y = SH - size + 10.0f + by + sink;
+    gsKit_prim_sprite_texture(gs, &wtex[WBASE[weapon] + frame],
         x, y, 0.0f, 0.0f,
         x + size, y + size, (float)WEAPON_SIZE, (float)WEAPON_SIZE,
         1, rgba(0x80, 0x80, 0x80, 0x80));
@@ -1009,22 +1089,32 @@ static void stat_row(const char *label, int value, int max, float y, int r, int 
 
 static void draw_hud(void)
 {
-    int i, alive = enemies_alive(), at = AMMO_TYPE[weapon];
+    int i, alive = enemies_alive(), at = WEAP[weapon].atype;
     float m = 24.0f;
     static const int kc[3][3] = { { 50, 100, 240 }, { 240, 210, 40 }, { 230, 50, 50 } };
-    static const char *aname[3] = { "BULLETS", "ROCKETS", "FUEL" };
 
     stat_row("HP", health, 100, SH - m - 36.0f, 210, 20, 20);
     stat_row("AR", armor, 100, SH - m - 14.0f, 50, 120, 230);
 
-    /* municion del arma actual */
+    /* municion del arma actual: cargador grande y reserva chica */
     if (at >= 0) {
         char buf[16];
         float wd;
-        snprintf(buf, sizeof(buf), "%d", ammo[at]);
+        int low = (mag[weapon] <= WEAP[weapon].mag / 4);
+        u64 col = low ? rgba(255, 90, 60, 0x80) : rgba(255, 230, 80, 0x80);
+        snprintf(buf, sizeof(buf), "%d", mag[weapon]);
         wd = text_width(buf, 4.0f);
-        draw_text_shadow(buf, SW - m - wd, SH - m - 22.0f, 4.0f, rgba(255, 230, 80, 0x80));
-        draw_text_shadow(aname[at], SW - m - text_width(aname[at], 2.0f), SH - m - 38.0f, 2.0f, rgba(220, 220, 220, 0x80));
+        draw_text_shadow(buf, SW - m - 78.0f - wd, SH - m - 22.0f, 4.0f, col);
+        snprintf(buf, sizeof(buf), "/ %d", ammo[at]);
+        draw_text_shadow(buf, SW - m - text_width(buf, 3.0f), SH - m - 20.0f, 3.0f, rgba(220, 220, 220, 0x80));
+        draw_text_shadow(AMMO_NAME[at], SW - m - text_width(AMMO_NAME[at], 2.0f), SH - m - 38.0f, 2.0f, rgba(220, 220, 220, 0x80));
+        if (reloading) {
+            draw_text_shadow("RELOADING", SW - m - text_width("RELOADING", 2.0f), SH - m - 54.0f, 2.0f, rgba(120, 220, 255, 0x80));
+        } else if (mag[weapon] == 0 && ammo[at] == 0) {
+            draw_text_shadow("NO AMMO", SW - m - text_width("NO AMMO", 2.0f), SH - m - 54.0f, 2.0f, rgba(255, 90, 60, 0x80));
+        } else if (low && ammo[at] > 0) {
+            draw_text_shadow("RELOAD", SW - m - text_width("RELOAD", 2.0f), SH - m - 54.0f, 2.0f, rgba(255, 200, 60, 0x80));
+        }
     }
 
     /* armas */
@@ -1113,6 +1203,53 @@ static int b64_decode(const char *s, unsigned char *out)
         if (bits >= 8) { bits -= 8; out[n++] = (unsigned char)((acc >> bits) & 0xFF); }
     }
     return n;
+}
+
+/* Texturas con paleta de 256 colores (PSM T8): 4 veces menos VRAM que RGBA32.
+   Las usamos para armas y enemigos, que son muchas. */
+static void load_sheet8(const char *b64, int nframes, int size, GSTEXTURE *out)
+{
+    int blen = (int)(strlen(b64) / 4 * 3 + 8);
+    int total = nframes * size * size;
+    unsigned char *raw = (unsigned char *)malloc(blen);
+    unsigned char *idx = (unsigned char *)memalign(128, total);
+    u32 *clut = (u32 *)memalign(128, 256 * 4);
+    unsigned char *pal;
+    int n, pos = 0, f, p, i;
+    u32 vclut;
+
+    n = b64_decode(b64, raw);
+    pal = raw;
+    for (p = 768; p + 1 < n && pos < total; p += 2) {
+        int run = raw[p], val = raw[p + 1];
+        while (run-- > 0 && pos < total) idx[pos++] = (unsigned char)val;
+    }
+    while (pos < total) idx[pos++] = 0;
+
+    /* paleta CT32; el GS guarda las entradas con los bits 3 y 4 del indice intercambiados */
+    for (i = 0; i < 256; i++) {
+        int j = (i & 0xE7) | ((i & 0x08) << 1) | ((i & 0x10) >> 1);
+        if (i == 0) clut[j] = 0;
+        else clut[j] = (u32)pal[i * 3] | ((u32)pal[i * 3 + 1] << 8) |
+                       ((u32)pal[i * 3 + 2] << 16) | (0x80u << 24);
+    }
+    FlushCache(0);
+
+    vclut = gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
+    for (f = 0; f < nframes; f++) {
+        memset(&out[f], 0, sizeof(GSTEXTURE));
+        out[f].Width = size;
+        out[f].Height = size;
+        out[f].PSM = GS_PSM_T8;
+        out[f].ClutPSM = GS_PSM_CT32;
+        out[f].Mem = (void *)(idx + f * size * size);
+        out[f].Clut = clut;
+        out[f].VramClut = vclut;
+        out[f].Filter = GS_FILTER_NEAREST;
+        out[f].Vram = gsKit_vram_alloc(gs, gsKit_texture_size(size, size, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
+        gsKit_texture_upload(gs, &out[f]);
+    }
+    free(raw);
 }
 
 static void load_sheet(const char *b64, int nframes, int size, GSTEXTURE *out)
@@ -1215,6 +1352,7 @@ static void read_input(Input *in)
     if (p & PAD_SQUARE) in->strafe -= 1.0f;
     if (p & PAD_CIRCLE) in->strafe += 1.0f;
     if (p & (PAD_CROSS | PAD_R2)) in->fire = 1;
+    in->reload = ((p & PAD_TRIANGLE) && !(last & PAD_TRIANGLE));
 
     in->prev  = ((p & PAD_L1) && !(last & PAD_L1));
     in->next  = ((p & PAD_R1) && !(last & PAD_R1));
@@ -1259,8 +1397,13 @@ int main(int argc, char **argv)
     ncols = SW / COLW;
     if (ncols > MAXCOLS) ncols = MAXCOLS;
 
-    load_sheet(weapons_b64, WEAPON_COUNT * WEAPON_FRAMES, WEAPON_SIZE, wtex);
-    load_sheet(enemy_b64, ENEMY_FRAMES, ENEMY_SIZE, etex);
+    {
+        static const char *const wsheet[WEAPON_COUNT] = { w0_b64, w1_b64, w2_b64, w3_b64, w4_b64, w5_b64, w6_b64 };
+        int i;
+        for (i = 0; i < WEAPON_COUNT; i++) load_sheet8(wsheet[i], WNF[i], WEAPON_SIZE, &wtex[WBASE[i]]);
+    }
+    load_sheet8(enemy_b64, ENEMY_FRAMES, ENEMY_SIZE, etex);
+    load_sheet8(enemy2_b64, ENEMY_FRAMES, ENEMY_SIZE, etex + ENEMY_FRAMES);
     load_sheet(walls_b64, WALL_TEXTURES, WALL_SIZE, walltex);
     load_sheet(items_b64, ITEM_TEXTURES, ITEM_SIZE, itemtex);
 
