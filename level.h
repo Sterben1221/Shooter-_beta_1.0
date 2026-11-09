@@ -99,7 +99,6 @@ static const short ITEM_DEFS[][3] = {
     {13, 24, IT_AMMO_SMG},
     {29, 17, IT_MEDKIT},
     {29, 25, IT_VEST},
-    {15, 17, IT_AMMO_FUEL},
     {22, 10, IT_AMMO_SHELL},
     {36, 18, IT_KEY_Y},
     {34, 25, IT_W_CHAIN},
@@ -107,10 +106,8 @@ static const short ITEM_DEFS[][3] = {
     {35, 21, IT_MEDKIT},
     {35, 20, IT_AMMO_SHELL},
     {3, 20, IT_VEST},
-    {9, 29, IT_W_FLAME},
     {8, 20, IT_AMMO_SMG},
     {3, 29, IT_MEDKIT},
-    {3, 25, IT_AMMO_FUEL},
     {6, 22, IT_AMMO_SHELL},
     {15, 29, IT_W_ROCKET},
     {16, 36, IT_AMMO_ROCK},
@@ -122,9 +119,6 @@ static const short ITEM_DEFS[][3] = {
     {31, 31, IT_MEDKIT},
     {36, 31, IT_AMMO_CHAIN},
     {36, 36, IT_VEST},
-    {6, 15, IT_W_SAW},
-    {4, 14, IT_AMMO_FUEL},
     {5, 6, IT_AMMO_PIS},
-    {34, 26, IT_AMMO_FUEL},
 };
-#define N_ITEM_DEFS 44
+#define N_ITEM_DEFS 38

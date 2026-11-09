@@ -37,13 +37,13 @@
 
 /* Tipos de item (los 11 primeros coinciden con el icono de items_b64) */
 enum { IT_MEDKIT, IT_VEST, IT_AMMO_PIS, IT_AMMO_SMG, IT_AMMO_CHAIN, IT_AMMO_SHELL,
-       IT_AMMO_ROCK, IT_AMMO_FUEL, IT_KEY_B, IT_KEY_Y, IT_KEY_R,
+       IT_AMMO_ROCK, IT_KEY_B, IT_KEY_Y, IT_KEY_R,
        /* armas: tipo - IT_W_KNIFE = numero de arma */
-       IT_W_KNIFE, IT_W_PISTOL, IT_W_SHOT, IT_W_MP, IT_W_CHAIN, IT_W_ROCKET, IT_W_FLAME, IT_W_SAW };
+       IT_W_KNIFE, IT_W_PISTOL, IT_W_SHOT, IT_W_MP, IT_W_CHAIN, IT_W_ROCKET };
 
 /* Armas: 0 cuchillo, 1 pistola, 2 escopeta, 3 metralleta, 4 ametralladora, 5 lanzacohetes,
-          6 lanzallamas, 7 motosierra. Solo se pueden llevar MAX_WEAPONS a la vez. */
-/* Municion de reserva: 0 pistola, 1 metralleta, 2 ametralladora, 3 cartuchos, 4 cohetes, 5 nafta */
+          Solo se pueden llevar MAX_WEAPONS a la vez. */
+/* Municion de reserva: 0 pistola, 1 metralleta, 2 ametralladora, 3 cartuchos, 4 cohetes */
 #define MAX_WEAPONS 3
 
 #include "level.h"   /* mapa, enemigos e items (generado por tools/make_level.py) */
@@ -90,19 +90,17 @@ static const Weapon WEAP[WEAPON_COUNT] = {
     {  1,  8, 14.0f, 0.0f,   0,    0,     1,   30,     110,       1,      0 },  /* metralleta      */
     {  1,  4, 14.0f, 0.0f,   0,    0,     1,  100,     200,       2,      0 },  /* ametralladora   */
     {  6, 70, 16.0f, 0.0f,   0,    3,     1,    1,      70,       4,      0 },  /* lanzacohetes    */
-    {  1,  4,  6.0f, 0.35f,  1,    0,     1,   50,     120,       5,      0 },  /* lanzallamas     */
-    {  2,  6,  1.9f, 0.0f,   0,    0,     1,   40,     100,       5,      0 },  /* motosierra      */
 };
-#define AMMO_TYPES 6
-static const int AMMO_MAX[AMMO_TYPES] = { 70, 180, 300, 32, 20, 100 };
-static const int AMMO_PICK[AMMO_TYPES] = { 14, 30, 60, 8, 4, 40 };
-static const char *AMMO_NAME[AMMO_TYPES] = { "PISTOL", "SMG", "CHAINGUN", "SHELLS", "ROCKETS", "FUEL" };
-static const char *WNAME[WEAPON_COUNT] = { "KNIFE", "PISTOL", "SHOTGUN", "SMG", "CHAINGUN", "ROCKET", "FLAMER", "CHAINSAW" };
-static const int WGIVE[WEAPON_COUNT] = { 0, 14, 8, 30, 60, 5, 40, 40 };  /* reserva que trae un arma nueva */
+#define AMMO_TYPES 5
+static const int AMMO_MAX[AMMO_TYPES] = { 70, 180, 300, 32, 20 };
+static const int AMMO_PICK[AMMO_TYPES] = { 14, 30, 60, 8, 4 };
+static const char *AMMO_NAME[AMMO_TYPES] = { "PISTOL", "SMG", "CHAINGUN", "SHELLS", "ROCKETS" };
+static const char *WNAME[WEAPON_COUNT] = { "KNIFE", "PISTOL", "SHOTGUN", "SMG", "CHAINGUN", "ROCKET" };
+static const int WGIVE[WEAPON_COUNT] = { 0, 14, 8, 30, 60, 5 };  /* reserva que trae un arma nueva */
 
 /* Cuadros de textura de cada arma (cuantos tiene cada una y donde empieza) */
-static const int WNF[WEAPON_COUNT]   = { 4, 8, 8, 4, 4, 4, 4, 4 };
-static const int WBASE[WEAPON_COUNT] = { 0, 4, 12, 20, 24, 28, 32, 36 };
+static const int WNF[WEAPON_COUNT]   = { 4, 8, 8, 4, 4, 4 };
+static const int WBASE[WEAPON_COUNT] = { 0, 4, 12, 20, 24, 28 };
 
 /* Dificultad: 0 facil, 1 medio, 2 dificil */
 static const float DIFF_DMG[3] = { 0.6f, 1.0f, 1.5f };
@@ -377,7 +375,7 @@ static int pickup(Item *it)
         armor += 50; if (armor > 100) armor = 100;
         setmsg("VEST"); return 1;
     case IT_AMMO_PIS: case IT_AMMO_SMG: case IT_AMMO_CHAIN:
-    case IT_AMMO_SHELL: case IT_AMMO_ROCK: case IT_AMMO_FUEL: {
+    case IT_AMMO_SHELL: case IT_AMMO_ROCK: {
         int k = t - IT_AMMO_PIS, n = AMMO_PICK[k];
         if (half) { n /= 2; if (n < 1) n = 1; }
         if (!add_ammo(k, n)) return 0;
@@ -387,7 +385,7 @@ static int pickup(Item *it)
     case IT_KEY_Y: haveKey[1] = 1; setmsg("YELLOW KEY"); return 1;
     case IT_KEY_R: haveKey[2] = 1; setmsg("RED KEY"); return 1;
     default:
-        if (t >= IT_W_KNIFE && t <= IT_W_SAW) {
+        if (t >= IT_W_KNIFE && t <= IT_W_ROCKET) {
             int w = t - IT_W_KNIFE;
             if (have[w]) {                         /* ya la tengo: solo municion */
                 int n = (it->val > 0) ? it->val - 1 : WGIVE[w];
@@ -1130,7 +1128,7 @@ static void draw_sprites(void)
                 draw_billboard(&wtex[WBASE[it->type - IT_W_KNIFE] + 1], WEAPON_SIZE,
                                it->x, it->y, 0.46f, 0.05f);
             } else {
-                float sc = (it->val == 1 && it->type >= IT_AMMO_PIS && it->type <= IT_AMMO_FUEL) ? 0.26f : 0.38f;
+                float sc = (it->val == 1 && it->type >= IT_AMMO_PIS && it->type <= IT_AMMO_ROCK) ? 0.26f : 0.38f;
                 if (it->type >= IT_KEY_B) lift = 0.12f + 0.05f * sinf(frameCount * 0.08f);
                 draw_billboard(&itemtex[it->type], ITEM_SIZE, it->x, it->y, sc, lift);
             }
@@ -1161,7 +1159,6 @@ static void draw_weapon(void)
         }
     } else if (w->cd <= 8) {
         if (wtime < w->cd) frame = (shots & 1) ? 2 : 3;
-        else if (weapon == 7) frame = (frameCount / 3) & 1;      /* motosierra en reposo vibra */
     } else {
         if (wtime < 5) frame = 2; else if (wtime < 11) frame = 3;
     }
@@ -1695,7 +1692,7 @@ int main(int argc, char **argv)
     if (ncols > MAXCOLS) ncols = MAXCOLS;
 
     {
-        static const char *const wsheet[WEAPON_COUNT] = { w0_b64, w1_b64, w2_b64, w3_b64, w4_b64, w5_b64, w6_b64, w7_b64 };
+        static const char *const wsheet[WEAPON_COUNT] = { w0_b64, w1_b64, w2_b64, w3_b64, w4_b64, w5_b64 };
         int i;
         for (i = 0; i < WEAPON_COUNT; i++) load_sheet8(wsheet[i], WNF[i], WEAPON_SIZE, &wtex[WBASE[i]]);
     }
