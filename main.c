@@ -225,7 +225,7 @@ static void audio_update(void)
             voices[i].pos += SND_FRAME;
             if (voices[i].pos >= SND_LEN[voices[i].snd]) voices[i].active = 0;
         }
-        if (!any) break;
+        (void)any;      /* sin voces se manda silencio: asi el buffer nunca se vacia ni repite basura */
         for (s = 0; s < SND_FRAME; s++) {
             int v = acc[s];
             if (v > 32000) v = 32000;
