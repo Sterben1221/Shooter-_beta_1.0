@@ -66,7 +66,7 @@ enum { A_FIRE, A_FIRE2, A_RELOAD, A_PREV, A_NEXT, A_LEFT, A_RIGHT, A_SWAP, NACT 
 
 typedef struct {
     float x, y, face, homeX, homeY, homeFace;
-    int hp, state, timer, frame, cool, lost, type;
+    int hp, state, timer, frame, cool, lost, type, gun;   /* gun: 0 pistola, 1 metralleta */
 } Enemy;
 
 typedef struct { float x, y; int type, active, val, delay; } Item;
@@ -509,6 +509,7 @@ static void reset_game(void)
         e->y = e->homeY = ENEMY_DEFS[i][1] + 0.5f;
         e->face = e->homeFace = ENEMY_DEFS[i][2] * PI_F / 180.0f;
         e->type = ENEMY_DEFS[i][3];
+        e->gun = (i % 3 == 1) ? 1 : 0;      /* uno de cada tres lleva metralleta */
         e->hp = (int)(EHP[e->type] * DIFF_HP[diff] + 0.5f); if (e->hp < 1) e->hp = 1;
         e->state = E_IDLE; e->frame = 0;
         e->timer = (i * 37) % 500;   /* para que no giren todos a la vez */
@@ -649,6 +650,17 @@ static void enemy_step_sound(const Enemy *e)
     sfx_step(vol * 0.85f);
 }
 
+/* Disparo de un enemigo: se oye segun la distancia (mas fuerte si hay linea de vista) */
+static void enemy_shot_sound(const Enemy *e, int snd)
+{
+    float dx = e->x - px, dy = e->y - py;
+    float d = sqrtf(dx * dx + dy * dy), vol;
+    if (d > 20.0f) return;
+    vol = 1.0f - d / 20.0f;
+    if (!los(e->x, e->y, px, py)) vol *= 0.5f;
+    play_sound(snd, 0.35f + vol * 0.65f);
+}
+
 static void enemy_update(Enemy *e)
 {
     float dx = px - e->x, dy = py - e->y;
@@ -709,10 +721,27 @@ static void enemy_update(Enemy *e)
     case E_ATTACK:
         e->timer++;
         turn_toward(&e->face, atan2f(dy, dx), 0.2f);
+        if (e->gun) {
+            /* metralleta: rafaga de 3 tiros, mas rapida y con menos dano por tiro */
+            e->frame = EF_ATTACK + ((e->timer / 5) & 1 ? 2 : 1);
+            if (e->timer == 12 || e->timer == 17 || e->timer == 22) {
+                int chance = (int)(65.0f - d * 6.0f);
+                if (chance < 12) chance = 12;
+                enemy_shot_sound(e, SND_SMG);
+                if (los(e->x, e->y, px, py) && (rand() % 100) < chance)
+                    damage_player((int)((EDMG[e->type] * 0.55f + rand() % 3) * DIFF_DMG[diff] + 0.5f));
+            }
+            if (e->timer >= 30) {
+                e->state = E_CHASE; e->timer = 0;
+                e->cool = ECOOL[e->type] * 3 / 4 + rand() % 30;
+            }
+            break;
+        }
         e->frame = EF_ATTACK + (e->timer / 8 > 2 ? 2 : e->timer / 8);
         if (e->timer == 16) {
             int chance = (int)(90.0f - d * 8.0f);
             if (chance < 20) chance = 20;
+            enemy_shot_sound(e, SND_PISTOL);
             if (los(e->x, e->y, px, py) && (rand() % 100) < chance) damage_player((int)((EDMG[e->type] + rand() % 7) * DIFF_DMG[diff] + 0.5f));
         }
         if (e->timer >= 26) {
