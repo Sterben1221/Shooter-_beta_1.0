@@ -2,7 +2,7 @@
 # make              -> con sonido de pasos (audsrv)
 # make USE_SOUND=0  -> sin sonido
 EE_BIN  = fps.elf
-EE_OBJS = main.o assets.o
+EE_OBJS = main.o assets.o sounds.o
 
 GSKIT ?= $(PS2DEV)/gsKit
 

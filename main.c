@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "assets.h"
+#include "sounds.h"
 
 /* Tipos de item (los 11 primeros coinciden con el icono de items_b64) */
 enum { IT_MEDKIT, IT_VEST, IT_AMMO_PIS, IT_AMMO_SMG, IT_AMMO_CHAIN, IT_AMMO_SHELL,
@@ -152,12 +153,12 @@ static float zbuf[MAXCOLS];
 /* ------------------------------------------------------------------ */
 /* Sonido (pasos). Se compila solo con -DUSE_SOUND                     */
 /* ------------------------------------------------------------------ */
-#define SND_RATE   22050
 #define SND_FRAME  368          /* muestras por cuadro a 60 fps */
-#define SND_STEPLEN 1800
-#define NVOICE     8
-static short stepWave[SND_STEPLEN];
-static struct { int pos; float vol; int active; } voices[NVOICE];
+#define NVOICE     12
+enum { SND_STEP, SND_PISTOL, SND_SHOTGUN, SND_SMG, SND_CHAIN };
+static const short *SND_DATA[5];
+static int SND_LEN[5];
+static struct { int pos, snd; float vol; int active; } voices[NVOICE];
 static int audio_ok = 0;
 
 #ifdef USE_SOUND
@@ -168,8 +169,7 @@ extern unsigned int size_audsrv_irx;
 static void audio_init(void)
 {
 #ifdef USE_SOUND
-    int i, ret = 0;
-    float y = 0.0f;
+    int ret = 0;
     audsrv_fmt_t fmt;
 
     sbv_patch_enable_lmb();
@@ -180,19 +180,11 @@ static void audio_init(void)
     if (audsrv_set_format(&fmt) != 0) return;
     audsrv_set_volume(volume * 10);
 
-    /* paso: golpe grave + ruido filtrado que se apaga */
-    for (i = 0; i < SND_STEPLEN; i++) {
-        float env = expf(-(float)i / 330.0f);
-        float n = ((rand() & 0xFFFF) / 32768.0f) - 1.0f;
-        float thump = sinf(2.0f * PI_F * 85.0f * (float)i / SND_RATE) * expf(-(float)i / 520.0f);
-        y = y * 0.82f + n * 0.18f;
-        stepWave[i] = (short)((y * 0.9f + thump * 0.8f) * env * 15000.0f);
-    }
     audio_ok = 1;
 #endif
 }
 
-static void sfx_step(float vol)
+static void play_sound(int snd, float vol)
 {
     int i, slot = 0, oldest = -1;
     vol *= volume / 10.0f;
@@ -202,8 +194,10 @@ static void sfx_step(float vol)
         if (!voices[i].active) { slot = i; oldest = 1 << 30; break; }
         if (voices[i].pos > oldest) { oldest = voices[i].pos; slot = i; }
     }
-    voices[slot].pos = 0; voices[slot].vol = vol; voices[slot].active = 1;
+    voices[slot].pos = 0; voices[slot].snd = snd; voices[slot].vol = vol; voices[slot].active = 1;
 }
+
+static void sfx_step(float vol) { play_sound(SND_STEP, vol); }
 
 static void audio_update(void)
 {
@@ -217,11 +211,11 @@ static void audio_update(void)
         any = 1;
         for (s = 0; s < SND_FRAME; s++) {
             int p = voices[i].pos + s;
-            if (p >= SND_STEPLEN) break;
-            acc[s] += (int)(stepWave[p] * voices[i].vol);
+            if (p >= SND_LEN[voices[i].snd]) break;
+            acc[s] += (int)(SND_DATA[voices[i].snd][p] * voices[i].vol);
         }
         voices[i].pos += SND_FRAME;
-        if (voices[i].pos >= SND_STEPLEN) voices[i].active = 0;
+        if (voices[i].pos >= SND_LEN[voices[i].snd]) voices[i].active = 0;
     }
     if (!any) return;
     for (s = 0; s < SND_FRAME; s++) {
@@ -920,6 +914,10 @@ static void game_update(const Input *in)
             } else {
                 if (w->mag > 0) mag[weapon]--;
                 player_shoot();
+                if (weapon == 1) play_sound(SND_PISTOL, 0.9f);
+                else if (weapon == 2) play_sound(SND_SHOTGUN, 1.0f);
+                else if (weapon == 3) play_sound(SND_SMG, 0.8f);
+                else if (weapon == 4) play_sound(SND_CHAIN, 0.8f);
                 wcool = w->cd;
                 wtime = 0;
                 shots++;
@@ -1670,6 +1668,11 @@ int main(int argc, char **argv)
     (void)argc; (void)argv;
 
     pad_setup();
+    SND_DATA[SND_STEP] = snd_step; SND_LEN[SND_STEP] = snd_step_len;
+    SND_DATA[SND_PISTOL] = snd_pistol; SND_LEN[SND_PISTOL] = snd_pistol_len;
+    SND_DATA[SND_SHOTGUN] = snd_shotgun; SND_LEN[SND_SHOTGUN] = snd_shotgun_len;
+    SND_DATA[SND_SMG] = snd_smg; SND_LEN[SND_SMG] = snd_smg_len;
+    SND_DATA[SND_CHAIN] = snd_chain; SND_LEN[SND_CHAIN] = snd_chain_len;
     audio_init();
 
     gs = gsKit_init_global();
