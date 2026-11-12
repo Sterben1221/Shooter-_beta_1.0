@@ -160,6 +160,7 @@ static const short *SND_DATA[5];
 static int SND_LEN[5];
 static struct { int pos, snd; float vol; int active; } voices[NVOICE];
 static int audio_ok = 0;
+static int ringBytes = 0;     /* tamano del buffer de audsrv */
 
 #ifdef USE_SOUND
 extern unsigned char audsrv_irx[];
@@ -179,6 +180,7 @@ static void audio_init(void)
     fmt.freq = SND_RATE; fmt.bits = 16; fmt.channels = 1;
     if (audsrv_set_format(&fmt) != 0) return;
     audsrv_set_volume(volume * 10);
+    ringBytes = audsrv_available();
 
     audio_ok = 1;
 #endif
@@ -202,29 +204,37 @@ static void sfx_step(float vol) { play_sound(SND_STEP, vol); }
 static void audio_update(void)
 {
 #ifdef USE_SOUND
-    int acc[SND_FRAME], i, s, any = 0;
-    short buf[SND_FRAME];
+    /* Mantiene unos ~100 ms de audio en cola, sin importar a cuantos fps corra el juego
+       (antes se mandaba un trozo fijo por cuadro y a menos de 60 fps sonaba cortado). */
+    int loops;
     if (!audio_ok) return;
-    memset(acc, 0, sizeof(acc));
-    for (i = 0; i < NVOICE; i++) {
-        if (!voices[i].active) continue;
-        any = 1;
-        for (s = 0; s < SND_FRAME; s++) {
-            int p = voices[i].pos + s;
-            if (p >= SND_LEN[voices[i].snd]) break;
-            acc[s] += (int)(SND_DATA[voices[i].snd][p] * voices[i].vol);
+    for (loops = 0; loops < 10; loops++) {
+        int acc[SND_FRAME], i, s, any = 0, queued;
+        short buf[SND_FRAME];
+        queued = ringBytes - audsrv_available();
+        if (queued >= 4096) break;                       /* ya hay suficiente en cola */
+        memset(acc, 0, sizeof(acc));
+        for (i = 0; i < NVOICE; i++) {
+            if (!voices[i].active) continue;
+            any = 1;
+            for (s = 0; s < SND_FRAME; s++) {
+                int p = voices[i].pos + s;
+                if (p >= SND_LEN[voices[i].snd]) break;
+                acc[s] += (int)(SND_DATA[voices[i].snd][p] * voices[i].vol);
+            }
+            voices[i].pos += SND_FRAME;
+            if (voices[i].pos >= SND_LEN[voices[i].snd]) voices[i].active = 0;
         }
-        voices[i].pos += SND_FRAME;
-        if (voices[i].pos >= SND_LEN[voices[i].snd]) voices[i].active = 0;
+        if (!any) break;
+        for (s = 0; s < SND_FRAME; s++) {
+            int v = acc[s];
+            if (v > 32000) v = 32000;
+            if (v < -32000) v = -32000;
+            buf[s] = (short)v;
+        }
+        if (audsrv_available() < (int)sizeof(buf)) break;
+        audsrv_play_audio((char *)buf, sizeof(buf));
     }
-    if (!any) return;
-    for (s = 0; s < SND_FRAME; s++) {
-        int v = acc[s];
-        if (v > 32000) v = 32000;
-        if (v < -32000) v = -32000;
-        buf[s] = (short)v;
-    }
-    if (audsrv_available() >= (int)sizeof(buf)) audsrv_play_audio((char *)buf, sizeof(buf));
 #endif
 }
 
