@@ -66,7 +66,7 @@ enum { A_FIRE, A_FIRE2, A_RELOAD, A_PREV, A_NEXT, A_LEFT, A_RIGHT, A_SWAP, NACT 
 
 typedef struct {
     float x, y, face, homeX, homeY, homeFace;
-    int hp, state, timer, frame, cool, lost, type, gun;   /* gun: 0 pistola, 1 metralleta */
+    int hp, state, timer, frame, cool, lost, type, gun, aux;   /* gun: 0 pistola, 1 metralleta, 2 jefe */
 } Enemy;
 
 typedef struct { float x, y; int type, active, val, delay; } Item;
@@ -108,10 +108,11 @@ static const float DIFF_DMG[3] = { 0.6f, 1.0f, 1.5f };
 static const float DIFF_HP[3]  = { 0.7f, 1.0f, 1.4f };
 
 /* Enemigos: 0 soldado blanco, 1 soldado verde (mas duro) */
-static const int   EHP[ENEMY_TYPES]    = { 6, 9 };
-static const float ESPEED[ENEMY_TYPES] = { 0.025f, 0.030f };
-static const int   EDMG[ENEMY_TYPES]   = { 6, 9 };
-static const int   ECOOL[ENEMY_TYPES]  = { 40, 26 };
+/* tipos: 0 blanco, 1 verde, 2 explosivo, 3 guardia azul (metralleta), 4 SS (metralleta), 5 jefe */
+static const int   EHP[ENEMY_TYPES]    = { 6, 9, 4, 8, 12, 60 };
+static const float ESPEED[ENEMY_TYPES] = { 0.025f, 0.030f, 0.055f, 0.028f, 0.032f, 0.020f };
+static const int   EDMG[ENEMY_TYPES]   = { 6, 9, 0, 8, 10, 10 };
+static const int   ECOOL[ENEMY_TYPES]  = { 40, 26, 0, 30, 24, 50 };
 
 /* ------------------------------------------------------------------ */
 /* Estado global                                                       */
@@ -142,7 +143,9 @@ static int msgTimer;
 
 static GSGLOBAL *gs;
 static GSTEXTURE wtex[WEAPON_TOTAL];
-static GSTEXTURE etex[ENEMY_FRAMES * ENEMY_TYPES];
+static GSTEXTURE etex[ENEMY_SETS];     /* un atlas por tipo (8 x 7 cuadros de 64x64) */
+static GSTEXTURE bosstex, facetex;
+static int curLevel, grinTimer, faceHurt, faceDir;
 static GSTEXTURE walltex[WALL_TEXTURES];
 static GSTEXTURE itemtex[ITEM_TEXTURES];
 static GSTEXTURE doortex[DOOR_FRAMES];
@@ -155,9 +158,26 @@ static float zbuf[MAXCOLS];
 /* ------------------------------------------------------------------ */
 #define SND_FRAME  368          /* muestras por cuadro a 60 fps */
 #define NVOICE     12
-enum { SND_STEP, SND_PISTOL, SND_SHOTGUN, SND_SMG, SND_CHAIN };
-static const short *SND_DATA[5];
-static int SND_LEN[5];
+enum { SND_STEP, SND_PISTOL, SND_SHOTGUN, SND_SMG, SND_CHAIN, SND_BOOM };
+static const short *SND_DATA[6];
+static int SND_LEN[6];
+#define BOOM_LEN 14000
+static short boomWave[BOOM_LEN];
+
+/* explosion: ruido grave que se apaga + golpe de baja frecuencia */
+static void boom_init(void)
+{
+    int i;
+    float y = 0.0f;
+    for (i = 0; i < BOOM_LEN; i++) {
+        float env = expf(-(float)i / 3200.0f);
+        float n = ((rand() & 0xFFFF) / 32768.0f) - 1.0f;
+        float thump = sinf(2.0f * PI_F * 48.0f * (float)i / SND_RATE) * expf(-(float)i / 2600.0f);
+        y = y * 0.90f + n * 0.10f;
+        boomWave[i] = (short)((y * 1.4f + thump * 0.9f) * env * 15000.0f);
+    }
+    SND_DATA[SND_BOOM] = boomWave; SND_LEN[SND_BOOM] = BOOM_LEN;
+}
 static struct { int pos, snd; float vol; int active; } voices[NVOICE];
 static int audio_ok = 0;
 static int ringBytes = 0;     /* tamano del buffer de audsrv */
@@ -362,6 +382,7 @@ static void take_weapon(int w, int val)
     if (WEAP[w].mag > 0) mag[w] = (val > 0) ? val - 1 : WEAP[w].mag;
     if (val == 0 && WEAP[w].atype >= 0) add_ammo(WEAP[w].atype, WGIVE[w]);
     select_weapon(w);
+    grinTimer = 70;
     setmsg(WNAME[w]);
 }
 
@@ -478,21 +499,24 @@ static void damage_player(int dmg)
     armor -= a;
     health -= dmg - a;
     hurtFlash = 14;
+    faceHurt = 24; faceDir = rand() & 1;
 }
 
 /* ------------------------------------------------------------------ */
 /* Juego                                                               */
 /* ------------------------------------------------------------------ */
-static void reset_game(void)
+static void start_level(int n, int keep)
 {
     int x, y, i;
+    const LevelDef *lv = &LEVELS[n];
+    curLevel = n;
     nEnemies = 0; nItems = 0;
     memset(wallMap, 0, sizeof(wallMap));
     memset(doorOpen, 0, sizeof(doorOpen));
     memset(doorMoving, 0, sizeof(doorMoving));
     for (y = 0; y < MAPH; y++) {
         for (x = 0; x < MAPW; x++) {
-            char c = level[y][x];
+            char c = lv->map[y][x];
             if (c >= '1' && c <= '4') wallMap[y][x] = (unsigned char)(c - '0');
             else if (c == 'd') wallMap[y][x] = 5;
             else if (c == 'b') wallMap[y][x] = 6;
@@ -502,33 +526,40 @@ static void reset_game(void)
             else if (c == 'P') { px = x + 0.5f; py = y + 0.5f; }
         }
     }
-    for (i = 0; i < N_ENEMY_DEFS && nEnemies < MAX_ENEMIES; i++) {
+    for (i = 0; i < lv->nEnemies && nEnemies < MAX_ENEMIES; i++) {
         Enemy *e = &enemies[nEnemies++];
         memset(e, 0, sizeof(*e));
-        e->x = e->homeX = ENEMY_DEFS[i][0] + 0.5f;
-        e->y = e->homeY = ENEMY_DEFS[i][1] + 0.5f;
-        e->face = e->homeFace = ENEMY_DEFS[i][2] * PI_F / 180.0f;
-        e->type = ENEMY_DEFS[i][3];
-        e->gun = (i % 3 == 1) ? 1 : 0;      /* uno de cada tres lleva metralleta */
+        e->x = e->homeX = lv->enemies[i][0] + 0.5f;
+        e->y = e->homeY = lv->enemies[i][1] + 0.5f;
+        e->face = e->homeFace = lv->enemies[i][2] * PI_F / 180.0f;
+        e->type = lv->enemies[i][3];
+        if (e->type == 3 || e->type == 4) e->gun = 1;          /* guardia azul y SS: metralleta */
+        else if (e->type == 5) e->gun = 2;                      /* jefe: ametralladora y escopeta */
+        else if (e->type == 2) e->gun = 0;                      /* explosivo: sin arma */
+        else e->gun = (i % 3 == 1) ? 1 : 0;                     /* blancos y verdes: 1 de cada 3 */
         e->hp = (int)(EHP[e->type] * DIFF_HP[diff] + 0.5f); if (e->hp < 1) e->hp = 1;
         e->state = E_IDLE; e->frame = 0;
         e->timer = (i * 37) % 500;   /* para que no giren todos a la vez */
     }
-    for (i = 0; i < N_ITEM_DEFS; i++)
-        spawn_item(ITEM_DEFS[i][0] + 0.5f, ITEM_DEFS[i][1] + 0.5f, ITEM_DEFS[i][2], 0);
+    for (i = 0; i < lv->nItems; i++)
+        spawn_item(lv->items[i][0] + 0.5f, lv->items[i][1] + 0.5f, lv->items[i][2], 0);
 
     pa = 0.0f; bob = 0.0f; stepAcc = 0.0f;
-    health = 100; armor = 0; kills = 0;
-    memset(have, 0, sizeof(have)); memset(ammo, 0, sizeof(ammo)); memset(mag, 0, sizeof(mag));
     memset(haveKey, 0, sizeof(haveKey));
-    have[0] = 1; have[1] = 1; mag[1] = WEAP[1].mag; ammo[0] = 28; weapon = 1;
+    if (!keep) {
+        health = 100; armor = 0; kills = 0;
+        memset(have, 0, sizeof(have)); memset(ammo, 0, sizeof(ammo)); memset(mag, 0, sizeof(mag));
+        have[0] = 1; have[1] = 1; mag[1] = WEAP[1].mag; ammo[0] = 28; weapon = 1;
+    }
     reloading = 0; rtime = 0;
     wcool = 0; wtime = 100; shots = 0;
-    hurtFlash = 0; gameState = G_PLAY;
-    setmsg("FIND THE EXIT");
+    hurtFlash = 0; faceHurt = 0; grinTimer = 0; gameState = G_PLAY;
+    setmsg(n == 0 ? "FIND THE EXIT" : "LEVEL 2 - FIND THE BOSS");
     build_dmap();
     rebuild_home_maps();
 }
+
+static void reset_game(void) { start_level(0, 0); }
 
 static int enemies_alive(void)
 {
@@ -536,6 +567,28 @@ static int enemies_alive(void)
     for (i = 0; i < nEnemies; i++)
         if (enemies[i].state != E_DEAD) n++;
     return n;
+}
+
+static void hurt_enemy(Enemy *e, int dmg);
+
+/* Explosion del enemigo kamikaze: daña al jugador y a los enemigos cercanos */
+static void explode(Enemy *e)
+{
+    float dx = px - e->x, dy = py - e->y, d = sqrtf(dx * dx + dy * dy), vol;
+    int i;
+    vol = 1.0f - d / 22.0f; if (vol < 0.0f) vol = 0.0f;
+    if (vol > 0.0f) play_sound(SND_BOOM, 0.4f + vol * 0.6f);
+    if (d < 2.6f && los(e->x, e->y, px, py)) {
+        int dmg = (int)((50.0f * (1.0f - d / 2.6f) + 8.0f) * DIFF_DMG[diff] + 0.5f);
+        damage_player(dmg);
+    }
+    for (i = 0; i < nEnemies; i++) {
+        Enemy *o = &enemies[i];
+        float ex, ey;
+        if (o == e || o->state == E_DEAD) continue;
+        ex = o->x - e->x; ey = o->y - e->y;
+        if (ex * ex + ey * ey < 2.0f * 2.0f) hurt_enemy(o, 6);
+    }
 }
 
 static void hurt_enemy(Enemy *e, int dmg)
@@ -548,7 +601,14 @@ static void hurt_enemy(Enemy *e, int dmg)
     if (e->hp <= 0) {
         e->state = E_DEAD;
         kills++;
-        if (rand() % 3) spawn_item(e->x, e->y, (rand() % 4 == 0) ? IT_AMMO_SHELL : IT_AMMO_PIS, 1);
+        if (e->type == 2) explode(e);
+        else if (e->type == 5) {
+            spawn_item(e->x, e->y, IT_MEDKIT, 0);
+            setmsg("BOSS DOWN - GET OUT");
+        } else if (rand() % 3) spawn_item(e->x, e->y, (rand() % 4 == 0) ? IT_AMMO_SHELL : IT_AMMO_PIS, 1);
+    } else if (e->type == 5) {
+        /* el jefe no se aturde: solo se activa */
+        if (e->state == E_IDLE || e->state == E_RETURN) { e->state = E_CHASE; e->timer = 0; }
     } else {
         e->state = E_PAIN;
     }
@@ -577,7 +637,7 @@ static void player_shoot(void)
         d = sqrtf(dx * dx + dy * dy);
         if (d > w->range || d < 0.01f) continue;
         ang = fabsf(norm_angle(atan2f(dy, dx) - pa));
-        tol = (w->tol > 0.0f) ? w->tol : atanf(0.30f / d);
+        tol = (w->tol > 0.0f) ? w->tol : atanf((e->type == 5 ? 0.55f : 0.30f) / d);
         if (ang > tol) continue;
         if (!los(px, py, e->x, e->y)) continue;
         if (w->multi) {
@@ -685,8 +745,10 @@ static void enemy_update(Enemy *e)
         if (see) e->lost = 0; else e->lost++;
         if (e->lost > 420) { e->state = E_RETURN; e->timer = 0; break; }
         if (see) turn_toward(&e->face, atan2f(dy, dx), 0.12f);
-        if (see && d < 8.0f && e->cool == 0) {
-            e->state = E_ATTACK; e->timer = 0; e->frame = EF_ATTACK;
+        if (e->type == 2) {                         /* explosivo: corre hacia ti y estalla */
+            if (see && d < 1.5f) { e->state = E_ATTACK; e->timer = 0; e->frame = EF_ATTACK; break; }
+        } else if (see && d < (e->gun == 2 ? 10.0f : 8.0f) && e->cool == 0) {
+            e->state = E_ATTACK; e->timer = 0; e->frame = EF_ATTACK; e->aux = 0;
             break;
         }
         if (d > 1.1f) {
@@ -721,6 +783,37 @@ static void enemy_update(Enemy *e)
     case E_ATTACK:
         e->timer++;
         turn_toward(&e->face, atan2f(dy, dx), 0.2f);
+        if (e->type == 2) {                         /* se prepara (click, click) y explota */
+            e->frame = EF_ATTACK + ((e->timer / 4) & 1);
+            if (e->timer >= 14) hurt_enemy(e, 999);
+            break;
+        }
+        if (e->gun == 2) {
+            /* jefe: de cerca escopeta, de lejos ametralladora */
+            if (e->timer == 1) e->aux = (d < 4.5f) ? 1 : 0;
+            if (e->aux) {
+                e->frame = 5;
+                if (e->timer == 14) {
+                    int chance = (int)(95.0f - d * 10.0f);
+                    if (chance < 25) chance = 25;
+                    enemy_shot_sound(e, SND_SHOTGUN);
+                    if (los(e->x, e->y, px, py) && (rand() % 100) < chance)
+                        damage_player((int)((20 + rand() % 12) * DIFF_DMG[diff] + 0.5f));
+                }
+                if (e->timer >= 34) { e->state = E_CHASE; e->timer = 0; e->cool = ECOOL[5] + rand() % 30; }
+            } else {
+                e->frame = 4 + ((e->timer / 3) & 3);
+                if (e->timer >= 10 && e->timer < 42 && ((e->timer - 10) % 4) == 0) {
+                    int chance = (int)(60.0f - d * 4.0f);
+                    if (chance < 15) chance = 15;
+                    enemy_shot_sound(e, SND_CHAIN);
+                    if (los(e->x, e->y, px, py) && (rand() % 100) < chance)
+                        damage_player((int)((4 + rand() % 3) * DIFF_DMG[diff] + 0.5f));
+                }
+                if (e->timer >= 46) { e->state = E_CHASE; e->timer = 0; e->cool = ECOOL[5] + rand() % 30; }
+            }
+            break;
+        }
         if (e->gun) {
             /* metralleta: rafaga de 3 tiros, mas rapida y con menos dano por tiro */
             e->frame = EF_ATTACK + ((e->timer / 5) & 1 ? 2 : 1);
@@ -873,7 +966,11 @@ static void check_doors(void)
             ddx = x + 0.5f - px; ddy = y + 0.5f - py;
             if (ddx * ddx + ddy * ddy > 1.35f * 1.35f) continue;
             if (t == 5) doorMoving[y][x] = 1;
-            else if (t == 9) gameState = G_WIN;
+            else if (t == 9) {
+                if (curLevel + 1 < N_LEVELS) start_level(curLevel + 1, 1);
+                else gameState = G_WIN;
+                return;
+            }
             else if (haveKey[t - 6]) doorMoving[y][x] = 1;
             else if (msgTimer < 20) {
                 setmsg(t == 6 ? "NEED BLUE KEY" : (t == 7 ? "NEED YELLOW KEY" : "NEED RED KEY"));
@@ -953,6 +1050,7 @@ static void game_update(const Input *in)
             } else {
                 if (w->mag > 0) mag[weapon]--;
                 player_shoot();
+                if (weapon == 5) play_sound(SND_BOOM, 0.7f);
                 if (weapon == 1) play_sound(SND_PISTOL, 0.9f);
                 else if (weapon == 2) play_sound(SND_SHOTGUN, 1.0f);
                 else if (weapon == 3) play_sound(SND_SMG, 0.8f);
@@ -978,6 +1076,8 @@ static void game_update(const Input *in)
     for (i = 0; i < nEnemies; i++) enemy_update(&enemies[i]);
 
     if (hurtFlash > 0) hurtFlash--;
+    if (faceHurt > 0) faceHurt--;
+    if (grinTimer > 0) grinTimer--;
     if (msgTimer > 0) msgTimer--;
     if (health <= 0) { health = 0; gameState = G_DEAD; }
 }
@@ -1075,7 +1175,7 @@ static void draw_world(void)
 }
 
 /* Dibuja un sprite plano (billboard) con oclusion por columnas */
-static void draw_billboard(GSTEXTURE *t, int tsz, float wx, float wy, float scale, float lift)
+static void draw_billboard(GSTEXTURE *t, float u0, float v0, float tw, float th, float wx, float wy, float scale, float lift)
 {
     float dirx = cosf(pa), diry = sinf(pa);
     float plx = -diry * FOV, ply = dirx * FOV;
@@ -1111,8 +1211,8 @@ static void draw_billboard(GSTEXTURE *t, int tsz, float wx, float wy, float scal
             if (xe > x1) xe = x1;
             if (xe <= xs) continue;
             gsKit_prim_sprite_texture(gs, t,
-                xs, top, (xs - x0) / size * tsz, 0.0f,
-                xe, bottom, (xe - x0) / size * tsz, (float)tsz,
+                xs, top, u0 + (xs - x0) / size * tw, v0,
+                xe, bottom, u0 + (xe - x0) / size * tw, v0 + th,
                 1, rgba(shd, shd, shd, 0x80));
         } else {
             c++;
@@ -1156,18 +1256,32 @@ static void draw_sprites(void)
     for (i = 0; i < n; i++) {
         if (list[i].kind == 0) {
             const Enemy *e = &enemies[list[i].idx];
-            draw_billboard(&etex[e->type * ENEMY_FRAMES + enemy_frame_index(e)], ENEMY_SIZE, e->x, e->y, 1.0f, 0.0f);
+            if (e->type == 5) {
+                int bf;
+                if (e->state == E_DEAD) bf = 8 + (e->timer / 8 > 3 ? 3 : e->timer / 8);
+                else if (e->state == E_ATTACK) bf = (e->gun == 2 && e->aux) ? 5 : 4 + ((e->timer / 3) & 3);
+                else if (e->state == E_CHASE || e->state == E_RETURN) bf = (e->timer / 8) & 3;
+                else bf = 0;
+                draw_billboard(&bosstex, (float)((bf % BOSS_COLS) * ENEMY_SIZE), (float)((bf / BOSS_COLS) * ENEMY_SIZE),
+                               ENEMY_SIZE, ENEMY_SIZE, e->x, e->y, 1.3f, 0.0f);
+            } else {
+                int fi = enemy_frame_index(e);
+                float sc = 1.0f;
+                if (e->type == 2 && e->state == E_DEAD && e->frame <= EF_DEATH + 1) sc = 2.2f;   /* bola de fuego */
+                draw_billboard(&etex[e->type], (float)((fi % ENEMY_COLS) * ENEMY_SIZE), (float)((fi / ENEMY_COLS) * ENEMY_SIZE),
+                               ENEMY_SIZE, ENEMY_SIZE, e->x, e->y, sc, 0.0f);
+            }
         } else {
             const Item *it = &items[list[i].idx];
             float lift = 0.0f;
             if (it->delay > 0 && (frameCount & 4)) continue;      /* parpadea al soltarla */
             if (it->type >= IT_W_KNIFE) {
-                draw_billboard(&wtex[WBASE[it->type - IT_W_KNIFE] + 1], WEAPON_SIZE,
+                draw_billboard(&wtex[WBASE[it->type - IT_W_KNIFE] + 1], 0.0f, 0.0f, WEAPON_SIZE, WEAPON_SIZE,
                                it->x, it->y, 0.46f, 0.05f);
             } else {
                 float sc = (it->val == 1 && it->type >= IT_AMMO_PIS && it->type <= IT_AMMO_ROCK) ? 0.26f : 0.38f;
                 if (it->type >= IT_KEY_B) lift = 0.12f + 0.05f * sinf(frameCount * 0.08f);
-                draw_billboard(&itemtex[it->type], ITEM_SIZE, it->x, it->y, sc, lift);
+                draw_billboard(&itemtex[it->type], 0.0f, 0.0f, ITEM_SIZE, ITEM_SIZE, it->x, it->y, sc, lift);
             }
         }
     }
@@ -1176,7 +1290,7 @@ static void draw_sprites(void)
 static void draw_weapon(void)
 {
     int frame = 1;
-    float size = WEAPON_SIZE * 2.4f * (SH / 448.0f);
+    float size = WEAPON_SIZE * (weapon == 2 ? 3.8f : 2.4f) * (SH / 448.0f);   /* la escopeta nueva se dibuja mas grande */
     float x, y, bx, by, sink = 0.0f;
     const Weapon *w = &WEAP[weapon];
 
@@ -1307,6 +1421,21 @@ static void draw_hud(void)
     int i, alive = enemies_alive(), at = WEAP[weapon].atype;
     float m = 24.0f;
 
+    /* cara del jugador segun la vida (como en Wolfenstein) */
+    {
+        int lvl = (100 - health) / 15, f, col;
+        float fs = 2.4f * FACE_SIZE, fx = m, fy = SH - m - 36.0f - 8.0f - fs;
+        if (lvl < 0) lvl = 0;
+        if (lvl > 6) lvl = 6;
+        if (gameState == G_DEAD) f = 36;
+        else if (faceHurt > 0) { col = 3 + faceDir; f = lvl * 5 + col; if (lvl == 6) f = lvl * 5 + (faceDir ? 1 : 0); }
+        else if (grinTimer > 0) f = 35;
+        else { static const int cyc[4] = { 1, 0, 1, 2 }; f = lvl * 5 + cyc[(frameCount / 50) & 3]; }
+        rect(fx - 3, fy - 3, fx + fs + 3, fy + fs + 3, rgba(10, 10, 10, 0x60));
+        gsKit_prim_sprite_texture(gs, &facetex, fx, fy, (float)((f % FACE_COLS) * FACE_SIZE), (float)((f / FACE_COLS) * FACE_SIZE),
+                                  fx + fs, fy + fs, (float)((f % FACE_COLS) * FACE_SIZE + FACE_SIZE), (float)((f / FACE_COLS) * FACE_SIZE + FACE_SIZE),
+                                  1, rgba(0x80, 0x80, 0x80, 0x80));
+    }
     stat_row("HP", health, 100, SH - m - 36.0f, 210, 20, 20);
     stat_row("AR", armor, 100, SH - m - 14.0f, 50, 120, 230);
 
@@ -1357,6 +1486,8 @@ static void draw_hud(void)
         char buf[16];
         snprintf(buf, sizeof(buf), "EN %d", alive);
         draw_text_shadow(buf, SW - m - text_width(buf, 2.0f), m, 2.0f, rgba(255, 120, 120, 0x80));
+        snprintf(buf, sizeof(buf), "LEVEL %d", curLevel + 1);
+        draw_text_shadow(buf, SW - m - text_width(buf, 2.0f), m + 18.0f, 2.0f, rgba(220, 220, 220, 0x80));
     }
 
     /* mira */
@@ -1564,6 +1695,51 @@ static void load_tex8(const char *b64, int nframes, int tw, int th, GSTEXTURE *o
     free(raw);
 }
 
+/* Atlas T8: nframes de fw x fh en una sola textura de 'cols' columnas (un solo bloque de VRAM) */
+static void load_atlas8(const char *b64, int nframes, int fw, int fh, int cols, GSTEXTURE *out)
+{
+    int blen = (int)(strlen(b64) / 4 * 3 + 8);
+    int total = nframes * fw * fh;
+    int rows = (nframes + cols - 1) / cols, aw = cols * fw, ah = rows * fh;
+    unsigned char *raw = (unsigned char *)malloc(blen);
+    unsigned char *seq = (unsigned char *)malloc(total);
+    unsigned char *idx = (unsigned char *)memalign(128, aw * ah);
+    u32 *clut = (u32 *)memalign(128, 256 * 4);
+    unsigned char *pal;
+    int n, pos = 0, f, p, i, y;
+
+    n = b64_decode(b64, raw);
+    pal = raw;
+    for (p = 768; p + 1 < n && pos < total; p += 2) {
+        int run = raw[p], val = raw[p + 1];
+        while (run-- > 0 && pos < total) seq[pos++] = (unsigned char)val;
+    }
+    while (pos < total) seq[pos++] = 0;
+    memset(idx, 0, aw * ah);
+    for (f = 0; f < nframes; f++)
+        for (y = 0; y < fh; y++)
+            memcpy(idx + (size_t)((f / cols) * fh + y) * aw + (f % cols) * fw, seq + (size_t)(f * fh + y) * fw, fw);
+
+    for (i = 0; i < 256; i++) {
+        int j = (i & 0xE7) | ((i & 0x08) << 1) | ((i & 0x10) >> 1);
+        if (i == 0) clut[j] = 0;
+        else clut[j] = (u32)pal[i * 3] | ((u32)pal[i * 3 + 1] << 8) |
+                       ((u32)pal[i * 3 + 2] << 16) | (0x80u << 24);
+    }
+    FlushCache(0);
+
+    memset(out, 0, sizeof(GSTEXTURE));
+    out->Width = aw; out->Height = ah;
+    out->PSM = GS_PSM_T8; out->ClutPSM = GS_PSM_CT32;
+    out->Mem = (void *)idx; out->Clut = clut;
+    out->VramClut = gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
+    out->Filter = GS_FILTER_NEAREST;
+    out->Vram = gsKit_vram_alloc(gs, gsKit_texture_size(aw, ah, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
+    gsKit_texture_upload(gs, out);
+    free(seq);
+    free(raw);
+}
+
 static void load_sheet8(const char *b64, int nframes, int size, GSTEXTURE *out)
 {
     load_tex8(b64, nframes, size, size, out);
@@ -1738,8 +1914,13 @@ int main(int argc, char **argv)
         int i;
         for (i = 0; i < WEAPON_COUNT; i++) load_sheet8(wsheet[i], WNF[i], WEAPON_SIZE, &wtex[WBASE[i]]);
     }
-    load_sheet8(enemy_b64, ENEMY_FRAMES, ENEMY_SIZE, etex);
-    load_sheet8(enemy2_b64, ENEMY_FRAMES, ENEMY_SIZE, etex + ENEMY_FRAMES);
+    load_atlas8(enemy_b64,  ENEMY_FRAMES, ENEMY_SIZE, ENEMY_SIZE, ENEMY_COLS, &etex[0]);
+    load_atlas8(enemy2_b64, ENEMY_FRAMES, ENEMY_SIZE, ENEMY_SIZE, ENEMY_COLS, &etex[1]);
+    load_atlas8(enemy3_b64, ENEMY_FRAMES, ENEMY_SIZE, ENEMY_SIZE, ENEMY_COLS, &etex[2]);
+    load_atlas8(enemy4_b64, ENEMY_FRAMES, ENEMY_SIZE, ENEMY_SIZE, ENEMY_COLS, &etex[3]);
+    load_atlas8(enemy5_b64, ENEMY_FRAMES, ENEMY_SIZE, ENEMY_SIZE, ENEMY_COLS, &etex[4]);
+    load_atlas8(boss_b64, BOSS_FRAMES, ENEMY_SIZE, ENEMY_SIZE, BOSS_COLS, &bosstex);
+    load_atlas8(faces_b64, FACE_FRAMES, FACE_SIZE, FACE_SIZE, FACE_COLS, &facetex);
     load_sheet(walls_b64, WALL_TEXTURES, WALL_SIZE, walltex);
     load_sheet(items_b64, ITEM_TEXTURES, ITEM_SIZE, itemtex);
     load_sheet(doors_b64, DOOR_FRAMES, WALL_SIZE, doortex);
@@ -1747,6 +1928,7 @@ int main(int argc, char **argv)
     titletex.Filter = GS_FILTER_LINEAR;
 
     memcpy(bind, BIND_DEF, sizeof(bind));
+    boom_init();
     srand(12345);
     reset_game();
     gameState = G_MENU; menuScreen = M_MAIN; menuSel = 0;
